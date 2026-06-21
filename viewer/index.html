@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Camera to Robot</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+  <header>
+    <h1>Camera to Robot</h1>
+    <div id="header-status">
+      <div id="status-dot"></div>
+      <span id="header-status-label">Disconnected</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Left column: raw + Canny camera panels -->
+    <div id="camera-column">
+
+      <div class="panel" id="panel-camera-raw">
+        <div class="panel-label">Live</div>
+        <div id="camera-selector">
+          <select id="camera-select"><option value="" disabled selected>…</option></select>
+        </div>
+        <img id="camera-feed-raw" src="/camera" alt="raw camera feed" />
+      </div>
+
+      <div class="panel" id="panel-camera-canny">
+        <div class="panel-label">Canny</div>
+        <img id="camera-feed-canny" src="/camera/processed" alt="Canny edge feed" />
+      </div>
+
+    </div>
+
+    <!-- Right column: Three.js path viewer -->
+    <div class="panel" id="panel-3d">
+      <div class="panel-label">Path Preview</div>
+      <canvas id="threejs-canvas"></canvas>
+    </div>
+
+    <!-- Workspace setup overlay -->
+    <div id="ws-overlay" class="hidden">
+      <div id="ws-panel">
+        <div id="ws-panel-header">
+          <span>Workspace Setup</span>
+          <span id="ws-instructions">Define the robot work area using 3 physical reference points.</span>
+        </div>
+
+        <div id="ws-loaded-banner" class="hidden">
+          <div id="ws-loaded-info">
+            <span id="ws-loaded-size"></span>
+            <span id="ws-loaded-origin"></span>
+          </div>
+          <div class="ws-loaded-actions">
+            <button id="btn-use-workspace">Use This Workspace</button>
+            <button id="btn-ws-redefine">Set Up New</button>
+          </div>
+        </div>
+
+        <div id="ws-steps">
+
+          <div class="ws-step" id="ws-step-1">
+            <div class="ws-step-header">
+              <span class="ws-step-num">1</span>
+              <span class="ws-step-title">Activate Freedrive</span>
+            </div>
+            <p class="ws-step-desc">
+              Robot arm becomes compliant — you can push it by hand.
+              Attach a pen to the TCP for precision.
+            </p>
+            <div class="ws-step-actions">
+              <button id="btn-start-freedrive">Activate Freedrive</button>
+              <button id="btn-end-freedrive" class="hidden">Stop Freedrive</button>
+              <span id="freedrive-indicator" class="status-badge hidden">FREEDRIVE ACTIVE</span>
+            </div>
+          </div>
+
+          <div class="ws-step disabled" id="ws-step-2">
+            <div class="ws-step-header">
+              <span class="ws-step-num">2</span>
+              <span class="ws-step-title">Record 3 Reference Points</span>
+            </div>
+            <p class="ws-step-desc">
+              Move robot to each marked spot and click Record.
+            </p>
+
+            <div id="tcp-live">
+              TCP&nbsp;
+              <span class="tcp-axis">X</span><span id="tcp-x">—</span>&nbsp;
+              <span class="tcp-axis">Y</span><span id="tcp-y">—</span>&nbsp;
+              <span class="tcp-axis">Z</span><span id="tcp-z">—</span>
+            </div>
+
+            <div class="ws-point-row">
+              <div class="ws-point-label">
+                <span class="dot dot-p0"></span>P0 — Origin
+              </div>
+              <span class="ws-point-coords" id="coords-p0">not recorded</span>
+              <button class="btn-record" id="btn-record-p0" data-name="p0">Record</button>
+            </div>
+            <div class="ws-point-row">
+              <div class="ws-point-label">
+                <span class="dot dot-px"></span>Px — +X direction &amp; extent
+              </div>
+              <span class="ws-point-coords" id="coords-px">not recorded</span>
+              <button class="btn-record" id="btn-record-px" data-name="px">Record</button>
+            </div>
+            <div class="ws-point-row">
+              <div class="ws-point-label">
+                <span class="dot dot-py"></span>Py — +Y direction
+              </div>
+              <span class="ws-point-coords" id="coords-py">not recorded</span>
+              <button class="btn-record" id="btn-record-py" data-name="py">Record</button>
+            </div>
+          </div>
+
+          <div class="ws-step disabled" id="ws-step-3">
+            <div class="ws-step-header">
+              <span class="ws-step-num">3</span>
+              <span class="ws-step-title">Confirm</span>
+            </div>
+            <div id="ws-preview-size"></div>
+            <button id="btn-confirm-ws" disabled>Confirm &amp; Start</button>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <footer>
+    <div class="footer-group">
+      <label for="ip-input">Robot IP</label>
+      <input id="ip-input" type="text" value="192.168.1.100" spellcheck="false" />
+      <button id="btn-connect">Connect</button>
+      <button id="btn-disconnect">Disconnect</button>
+    </div>
+
+    <div class="footer-separator"></div>
+
+    <div class="footer-group">
+      <button id="btn-simulate" title="Set a synthetic workspace to test the vision pipeline without a robot">Test Mode (no robot)</button>
+      <button id="btn-capture" disabled>Capture</button>
+      <button id="btn-run" disabled>Run</button>
+      <button id="btn-cancel" class="hidden btn-cancel">Cancel</button>
+    </div>
+
+    <div class="footer-separator"></div>
+
+    <div id="progress-bar-wrap" class="hidden">
+      <div id="progress-bar"></div>
+    </div>
+
+    <div class="stat">Phase <span id="val-phase">idle</span></div>
+    <div class="stat">Strokes <span id="val-strokes">0</span></div>
+
+    <div class="footer-separator"></div>
+
+    <div id="connection-msg">Not connected</div>
+  </footer>
+
+  <script src="/static/lib/three.min.js"></script>
+  <script src="/static/lib/OrbitControls.js"></script>
+  <script src="/static/viewer.js"></script>
+</body>
+</html>

@@ -1,0 +1,360 @@
+import asyncio
+import os
+import signal
+import sys
+import threading
+import webbrowser
+
+# Force UTF-8 console output so Unicode in log messages (→, ×, …) never crashes
+# the program on Windows consoles that default to a legacy code page (cp1252).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
+from config import HTTP_HOST, HTTP_PORT, WORKSPACE_FILE, CAMERA_WIDTH, CAMERA_HEIGHT
+from camera_thread import CameraThread
+from path_extractor import extract_from_frame, pixels_to_robot_coords
+from path_executor import PathExecutor
+from robot_controller import RobotController
+from server import Server
+from settings import load_settings, save_settings
+from workspace import WorkspaceConfig
+
+def _enumerate_cameras() -> list[int]:
+    """Probe camera indices 0-7, return those that open successfully."""
+    import cv2
+    found = []
+    for i in range(8):
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            found.append(i)
+            cap.release()
+    print(f"[camera] available indices: {found}")
+    return found
+
+
+_available_cameras = _enumerate_cameras()
+
+# ── Shared state ──────────────────────────────────────────────────────────────
+shared_state: dict = {
+    "robot_connected":    False,
+    "last_frame_raw_jpg": None,
+    "last_frame_canny_jpg": None,
+    "workspace":          None,   # WorkspaceConfig | None — confirmed workspace
+    "pending_workspace":  None,   # WorkspaceConfig | None — loaded from disk
+    "ws_points":          {"p0": None, "px": None, "py": None},
+    "freedrive":          False,
+    "ee":                 [0.0] * 6,
+    "phase":              "idle",      # idle|previewing|captured|executing|done|error
+    "strokes":            [],          # robot-space strokes after Capture
+    "executing":          False,
+    "progress":           0.0,
+    "available_cameras":  _available_cameras,
+}
+state_lock = threading.Lock()
+
+# ── Singletons ────────────────────────────────────────────────────────────────
+robot         = RobotController()
+camera_thread = CameraThread(shared_state, state_lock)
+path_executor = PathExecutor(robot, shared_state, state_lock)
+
+
+# ── Robot connection callbacks ────────────────────────────────────────────────
+async def on_robot_connect(ip: str, ws) -> None:
+    loop = asyncio.get_running_loop()
+    try:
+        await asyncio.wait_for(
+            loop.run_in_executor(None, robot.connect, ip),
+            timeout=10.0,
+        )
+        with state_lock:
+            shared_state["robot_connected"] = True
+
+        save_settings({"last_ip": ip})
+
+        if WORKSPACE_FILE.exists():
+            try:
+                ws_cfg = WorkspaceConfig.load(WORKSPACE_FILE)
+                with state_lock:
+                    shared_state["pending_workspace"] = ws_cfg
+                await server.send_workspace_status(ws, loaded=True, workspace=ws_cfg)
+            except Exception as exc:
+                print(f"Failed to load workspace.json: {exc}")
+                await server.send_workspace_status(ws, loaded=False)
+        else:
+            await server.send_workspace_status(ws, loaded=False)
+
+        await server.send_connection_result(ws, True, f"Connected to {ip}")
+        print(f"Robot connected: {ip}")
+
+    except asyncio.TimeoutError:
+        with state_lock:
+            shared_state["robot_connected"] = False
+        msg = (
+            f"Timeout: no RTDE response from {ip} after 10 s. "
+            "Is the robot in Remote Control mode?"
+        )
+        await server.send_connection_result(ws, False, msg)
+        print(msg)
+    except Exception as exc:
+        with state_lock:
+            shared_state["robot_connected"] = False
+        await server.send_connection_result(ws, False, str(exc))
+        print(f"Robot connection failed: {exc}")
+
+
+async def on_robot_disconnect(ws) -> None:
+    loop = asyncio.get_running_loop()
+    path_executor.cancel()
+    if robot.connected:
+        await loop.run_in_executor(None, robot.end_freedrive)
+    await loop.run_in_executor(None, robot.disconnect)
+    with state_lock:
+        shared_state["robot_connected"] = False
+        shared_state["freedrive"]       = False
+        shared_state["pending_workspace"] = None
+        shared_state["executing"]       = False
+        shared_state["phase"]           = "idle"
+    if ws is not None:
+        await server.send_connection_result(ws, False, "Disconnected")
+    print("Robot disconnected")
+
+
+async def on_last_client_disconnect() -> None:
+    print("Last client disconnected — stopping camera and robot.")
+    loop = asyncio.get_running_loop()
+    camera_thread.stop()
+    path_executor.cancel()
+    if robot.connected:
+        await loop.run_in_executor(None, robot.end_freedrive)
+        await loop.run_in_executor(None, robot.disconnect)
+        with state_lock:
+            shared_state["robot_connected"] = False
+            shared_state["freedrive"]       = False
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+# ── Workspace setup callbacks ─────────────────────────────────────────────────
+async def on_start_freedrive() -> None:
+    with state_lock:
+        shared_state["freedrive"] = True
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, robot.start_freedrive)
+    print("Freedrive activated")
+
+
+async def on_end_freedrive() -> None:
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, robot.end_freedrive)
+    with state_lock:
+        shared_state["freedrive"] = False
+    print("Freedrive ended")
+
+
+async def on_record_point(name: str) -> None:
+    if name not in ("p0", "px", "py"):
+        return
+    pos = robot.get_ee_position()[:3]
+    with state_lock:
+        shared_state["ws_points"][name] = pos
+    print(f"Recorded workspace point {name}: {[round(v, 4) for v in pos]}")
+
+
+async def on_confirm_workspace() -> None:
+    with state_lock:
+        pts = shared_state["ws_points"].copy()
+
+    p0, px, py = pts.get("p0"), pts.get("px"), pts.get("py")
+    if p0 is None or px is None or py is None:
+        print("Cannot confirm workspace — not all points recorded.")
+        return
+
+    try:
+        ws_cfg = WorkspaceConfig.from_points(p0, px, py)
+    except ValueError as exc:
+        print(f"Workspace geometry error: {exc}")
+        return
+
+    ws_cfg.save(WORKSPACE_FILE)
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, robot.end_freedrive)
+    await asyncio.sleep(0.5)
+
+    with state_lock:
+        shared_state["workspace"]  = ws_cfg
+        shared_state["freedrive"]  = False
+        shared_state["ws_points"]  = {"p0": None, "px": None, "py": None}
+        shared_state["phase"]      = "previewing"
+
+    camera_thread.start()
+    print(
+        f"Workspace confirmed: {ws_cfg.x_extent:.3f} m × {ws_cfg.y_extent:.3f} m, "
+        f"origin {[round(v, 3) for v in ws_cfg.origin]}"
+    )
+
+
+async def on_use_workspace() -> None:
+    with state_lock:
+        ws_cfg = shared_state.pop("pending_workspace", None)
+        if ws_cfg is None:
+            ws_cfg = shared_state.get("workspace")
+        shared_state["workspace"] = ws_cfg
+        shared_state["phase"]     = "previewing"
+    camera_thread.start()
+    print("Using existing workspace — camera started.")
+
+
+async def on_simulate_workspace() -> None:
+    """
+    Set a synthetic workspace so the Canny→vector→Path-Preview pipeline can be
+    tested without a robot. Does not connect or move the robot; Run remains
+    gated on a real connection.
+    """
+    ws_cfg = WorkspaceConfig.simulation()
+    with state_lock:
+        shared_state["workspace"]         = ws_cfg
+        shared_state["pending_workspace"] = None
+        shared_state["ws_points"]         = {"p0": None, "px": None, "py": None}
+        shared_state["phase"]             = "previewing"
+    if not camera_thread.running:
+        camera_thread.start()
+    print(
+        f"Simulation workspace active (no robot): "
+        f"{ws_cfg.x_extent:.3f} m × {ws_cfg.y_extent:.3f} m — Capture enabled."
+    )
+
+
+async def on_reset_workspace() -> None:
+    camera_thread.stop()
+    if WORKSPACE_FILE.exists():
+        WORKSPACE_FILE.unlink()
+    with state_lock:
+        shared_state["workspace"]        = None
+        shared_state["pending_workspace"] = None
+        shared_state["ws_points"]        = {"p0": None, "px": None, "py": None}
+        shared_state["phase"]            = "idle"
+        shared_state["strokes"]          = []
+    print("Workspace reset — setup required again.")
+
+
+# ── Capture / Run / Cancel callbacks ─────────────────────────────────────────
+async def on_capture(ws) -> None:
+    with state_lock:
+        workspace = shared_state.get("workspace")
+
+    if workspace is None:
+        await server.send_capture_result(ws, False, error="No workspace configured.")
+        return
+
+    frame = camera_thread.capture_frame()
+    if frame is None:
+        await server.send_capture_result(ws, False, error="No camera frame available.")
+        return
+
+    loop = asyncio.get_running_loop()
+    try:
+        extracted = await loop.run_in_executor(None, extract_from_frame, frame)
+    except Exception as exc:
+        await server.send_capture_result(ws, False, error=str(exc))
+        return
+
+    robot_strokes = pixels_to_robot_coords(
+        extracted.strokes, workspace, CAMERA_WIDTH, CAMERA_HEIGHT, draw_z_offset=0.0
+    )
+
+    # Convert to serialisable list-of-lists for the browser's 3D preview
+    strokes_data = [
+        [[round(v, 5) for v in pose] for pose in stroke]
+        for stroke in robot_strokes
+    ]
+
+    with state_lock:
+        shared_state["strokes"] = robot_strokes
+        shared_state["phase"]   = "captured" if robot_strokes else "previewing"
+
+    await server.send_capture_result(
+        ws,
+        success=True,
+        stroke_count=extracted.total_strokes,
+        point_count=extracted.total_points,
+        strokes_data=strokes_data,
+    )
+    print(f"Captured: {extracted.total_strokes} strokes, {extracted.total_points} points")
+
+
+async def on_run(ws) -> None:
+    with state_lock:
+        strokes   = shared_state.get("strokes", [])
+        connected = shared_state.get("robot_connected", False)
+
+    if not strokes:
+        return
+    if not connected:
+        await server.send_capture_result(ws, False, error="Robot not connected.")
+        return
+    if path_executor.running:
+        return
+
+    path_executor.start(strokes)
+    print(f"[executor] starting path: {len(strokes)} strokes")
+
+
+async def on_cancel(ws) -> None:
+    path_executor.cancel()
+    print("[executor] cancel requested")
+
+
+async def on_select_camera(index: int) -> None:
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, camera_thread.stop)
+    await loop.run_in_executor(None, camera_thread.start, index)
+    print(f"[camera] switched to index {index}")
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+server = Server(
+    shared_state,
+    state_lock,
+    robot,
+    on_connect=on_robot_connect,
+    on_disconnect=on_robot_disconnect,
+    on_last_disconnect=on_last_client_disconnect,
+    on_start_freedrive=on_start_freedrive,
+    on_end_freedrive=on_end_freedrive,
+    on_record_point=on_record_point,
+    on_confirm_workspace=on_confirm_workspace,
+    on_reset_workspace=on_reset_workspace,
+    on_simulate_workspace=on_simulate_workspace,
+    on_use_workspace=on_use_workspace,
+    on_capture=on_capture,
+    on_run=on_run,
+    on_cancel=on_cancel,
+    on_select_camera=on_select_camera,
+)
+
+# Camera starts immediately so both MJPEG feeds are live from the moment you open the browser
+camera_thread.start()
+
+
+async def _open_browser() -> None:
+    await asyncio.sleep(1.0)
+    webbrowser.open(f"http://{HTTP_HOST}:{HTTP_PORT}")
+
+
+async def _main() -> None:
+    asyncio.create_task(_open_browser())
+    await server.start()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(_main())
+    except KeyboardInterrupt:
+        print("\nShutting down.")
+        camera_thread.stop()
+        path_executor.cancel()
+        robot.end_freedrive()
+        robot.disconnect()

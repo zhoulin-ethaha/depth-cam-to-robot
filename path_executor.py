@@ -1,0 +1,172 @@
+import math
+import threading
+import time
+from typing import Optional
+
+from config import DRAW_Z, TRAVEL_Z, DRAW_SPEED, TRAVEL_SPEED, TRAVEL_ACCEL, RTDE_FREQUENCY
+
+
+class PathExecutor:
+    """
+    Executes an ordered list of robot-space strokes via blocking moveL calls.
+    Runs in a daemon thread so the async event loop is never blocked.
+    Progress and phase are written back to shared_state as execution proceeds.
+    """
+
+    def __init__(self, robot, shared_state: dict, state_lock: threading.Lock) -> None:
+        self._robot = robot
+        self._state = shared_state
+        self._state_lock = state_lock
+        self._cancel_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self, strokes: list[list[list[float]]]) -> None:
+        if self.running:
+            return
+        self._cancel_event.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(strokes,),
+            daemon=True,
+            name="path_executor",
+        )
+        self._thread.start()
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+        if self._robot.connected:
+            self._robot.stop_motion()
+
+    def _run(self, strokes: list[list[list[float]]]) -> None:
+        with self._state_lock:
+            self._state["executing"] = True
+            self._state["phase"]     = "executing"
+            self._state["progress"]  = 0.0
+
+        total_moves = sum(len(s) for s in strokes) + len(strokes) * 2
+        moves_done  = 0
+        cancelled   = False
+
+        try:
+            current_ee = self._robot.get_ee_position()
+            cx, cy, cz = current_ee[0], current_ee[1], current_ee[2]
+            rx, ry, rz = current_ee[3], current_ee[4], current_ee[5]
+
+            for stroke in strokes:
+                if self._cancel_event.is_set():
+                    cancelled = True
+                    break
+
+                sx, sy, sz = stroke[0][0], stroke[0][1], stroke[0][2]
+
+                # Lift above current position
+                lift_pose = [cx, cy, cz + TRAVEL_Z, rx, ry, rz]
+                self._robot.move_to(lift_pose, TRAVEL_SPEED, TRAVEL_ACCEL)
+                moves_done += 1
+                self._update_progress(moves_done, total_moves)
+
+                if self._cancel_event.is_set():
+                    cancelled = True
+                    break
+
+                # Travel laterally to above stroke start
+                travel_pose = [sx, sy, sz + TRAVEL_Z] + stroke[0][3:]
+                self._robot.move_to(travel_pose, TRAVEL_SPEED, TRAVEL_ACCEL)
+                moves_done += 1
+                self._update_progress(moves_done, total_moves)
+
+                if self._cancel_event.is_set():
+                    cancelled = True
+                    break
+
+                # Stream stroke via servoL at RTDE_FREQUENCY for smooth continuous motion
+                self._servo_draw_stroke(stroke)
+
+                moves_done += len(stroke)
+                self._update_progress(moves_done, total_moves)
+
+                if self._cancel_event.is_set():
+                    cancelled = True
+                    break
+
+                cx, cy, cz = stroke[-1][0], stroke[-1][1], stroke[-1][2] + DRAW_Z
+                rx, ry, rz = stroke[-1][3], stroke[-1][4], stroke[-1][5]
+
+            # Final pen-up
+            if self._robot.connected:
+                final_ee = self._robot.get_ee_position()
+                final_lift = [final_ee[0], final_ee[1], final_ee[2] + TRAVEL_Z,
+                              final_ee[3], final_ee[4], final_ee[5]]
+                self._robot.move_to(final_lift, TRAVEL_SPEED, TRAVEL_ACCEL)
+
+        except Exception as exc:
+            print(f"[executor] error during path execution: {exc}")
+            with self._state_lock:
+                self._state["executing"] = False
+                self._state["phase"]     = "error"
+                self._state["progress"]  = 0.0
+            return
+
+        with self._state_lock:
+            self._state["executing"] = False
+            self._state["phase"]     = "captured" if cancelled else "done"
+            self._state["progress"]  = 0.0 if cancelled else 1.0
+
+        print(f"[executor] {'cancelled' if cancelled else 'done'}")
+
+    def _servo_draw_stroke(self, stroke: list[list[float]]) -> None:
+        """Stream a stroke via servoL at RTDE_FREQUENCY, advancing at DRAW_SPEED."""
+        dt = 1.0 / RTDE_FREQUENCY
+        waypoints = [[p[0], p[1], p[2] + DRAW_Z] + p[3:] for p in stroke]
+
+        arcs = [0.0]
+        for i in range(1, len(waypoints)):
+            dx = waypoints[i][0] - waypoints[i - 1][0]
+            dy = waypoints[i][1] - waypoints[i - 1][1]
+            arcs.append(arcs[-1] + math.sqrt(dx * dx + dy * dy))
+
+        total_arc = arcs[-1]
+        if total_arc < 1e-6:
+            self._robot.servo_to(waypoints[0])
+            time.sleep(dt * 5)
+            self._robot.stop_servo()
+            return
+
+        n_steps = max(int(total_arc / DRAW_SPEED / dt), 1)
+        t_start = time.perf_counter()
+
+        for step in range(n_steps + 1):
+            if self._cancel_event.is_set():
+                break
+            alpha = step / n_steps
+            alpha_s = alpha * alpha * (3.0 - 2.0 * alpha)  # smoothstep ease-in/out
+            s = alpha_s * total_arc
+
+            j = 0
+            while j + 1 < len(arcs) and arcs[j + 1] < s:
+                j += 1
+            if j + 1 >= len(waypoints):
+                pos = waypoints[-1][:]
+            else:
+                seg = arcs[j + 1] - arcs[j]
+                t = (s - arcs[j]) / seg if seg > 1e-9 else 0.0
+                pos = [waypoints[j][k] + t * (waypoints[j + 1][k] - waypoints[j][k])
+                       for k in range(6)]
+
+            self._robot.servo_to(pos)
+
+            sleep_t = t_start + (step + 1) * dt - time.perf_counter()
+            if sleep_t > 0:
+                time.sleep(sleep_t)
+
+        self._robot.stop_servo()
+
+    def _update_progress(self, done: int, total: int) -> None:
+        if total <= 0:
+            return
+        with self._state_lock:
+            self._state["progress"] = min(done / total, 1.0)
