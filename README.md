@@ -1,6 +1,8 @@
 # camera-to-robot
 
-Turn any webcam image into a UR robot drawing. Point the camera at an object or sketch, click **Capture**, click **Run** — the robot traces every detected edge with a pen.
+Turn any webcam image into a UR robot drawing. Point the camera at an object or sketch, click **Capture Image**, crop and adjust the still until the marking stands out, click **Generate Path**, then **Run** — the robot traces every detected edge with a pen.
+
+The capture/adjust step is built for *subtle* subjects — e.g. shallow markings raked into a sandbox — where the signal is barely above the background. You freeze a frame, crop to the area of interest, and tune exposure / brightness / contrast / highlights / shadows / gamma / local contrast (CLAHE) / invert plus the Canny thresholds, with a live edge preview, before committing to a tool path.
 
 ---
 
@@ -169,11 +171,20 @@ The browser opens automatically at `http://localhost:8080`. Closing the browser 
      - **Py** — a point along the Y direction (e.g. top-left corner)
    - Click **Confirm Workspace** — the geometry is saved to `workspace.json` for all future sessions.
 
-3. **Point the camera** at your drawing so it covers the whole paper.
+3. **Point the camera** at your subject so it covers the whole work surface.
 
-4. **Capture** — click **Capture**. The Canny preview updates live; after capture the 3D viewer shows the extracted path (green = pen-down strokes, grey = pen-up travel segments).
+4. **Capture Image** — click **Capture Image** to freeze the current frame. The live feeds are replaced by the captured still (left) and a processed preview (right).
 
-5. **Run** — click **Run**. The robot lifts, travels to the first stroke, and draws. A progress bar tracks execution. Click **Cancel** at any time to stop mid-stroke.
+5. **Crop & adjust** — in the **Adjust Image** panel:
+   - **✨ Auto Touch-Up** — one click to reveal faint relief like grooves raked into sand. It robustly stretches contrast (1st–99th percentile), denoises grain with an edge-preserving bilateral filter, applies CLAHE local equalization, and sharpens the ridges, then auto-picks the Canny thresholds from the image. Use **Auto strength** to scale how aggressive it is, then fine-tune with the manual sliders on top. Raise **Blur** if grain still produces speckle edges.
+   - Drag on the still to draw a **crop** rectangle (drag inside to move, corners to resize; **Reset Crop** restores the full frame). The crop selects which part of the workspace gets drawn — strokes stay positioned correctly within the calibrated area.
+   - Tune **Exposure / Brightness / Contrast / Highlights / Shadows / Gamma**, toggle **Local contrast (CLAHE)** for faint texture, or **Invert** for light marks on a dark ground.
+   - Tune **Blur** and **Canny low/high** to control edge sensitivity.
+   - The right panel updates live — switch between **Edges** (what becomes the path) and **Adjusted** (the tuned image). Aim for clean white edges on the marking with little background noise.
+
+6. **Generate Path** — click **Generate Path**. The 3D viewer shows the extracted path (green = pen-down strokes, grey = pen-up travel). Re-adjust and regenerate as many times as you like, or **Retake** to grab a fresh frame.
+
+7. **Run** — click **Run**. The robot lifts, travels to the first stroke, and draws. A progress bar tracks execution. Click **Cancel** at any time to stop mid-stroke.
 
 ### Subsequent sessions
 

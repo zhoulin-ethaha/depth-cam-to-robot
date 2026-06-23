@@ -169,6 +169,10 @@ function connectWS() {
       setHeaderStatus("robot", data.success, data.message);
     } else if (data.type === "workspace_status") {
       handleWorkspaceStatus(data);
+    } else if (data.type === "still") {
+      handleStill(data);
+    } else if (data.type === "preview") {
+      handlePreview(data);
     } else if (data.type === "capture_result") {
       handleCaptureResult(data);
     } else if (data.type === "execution_update") {
@@ -220,13 +224,14 @@ function handleCaptureResult(data) {
   if (data.strokes && data.strokes.length > 0) {
     buildPathViz(data.strokes);
     setButtonsForPhase("captured");
+    setHeaderStatus("robot", true,
+      `Path ready: ${data.stroke_count} strokes, ${data.point_count} points`);
   } else {
     buildPathViz(null);
-    setButtonsForPhase("previewing");
+    setButtonsForPhase("editing");
+    setHeaderStatus("robot", false,
+      "No edges found — adjust contrast / Canny thresholds and try again.");
   }
-
-  setHeaderStatus("robot", true,
-    `Captured: ${data.stroke_count} strokes, ${data.point_count} points`);
 }
 
 /* ── Execution update ───────────────────────────────────────────────────── */
@@ -254,24 +259,39 @@ function updateScene(data) {
 }
 
 /* ── Footer update ──────────────────────────────────────────────────────── */
+let robotConnected = false;
+
 function updateFooter(data) {
+  if (typeof data.robot_connected === "boolean") robotConnected = data.robot_connected;
+
   document.getElementById("val-phase").textContent   = data.phase || "idle";
   document.getElementById("val-strokes").textContent = data.stroke_count ?? 0;
 
   setButtonsForPhase(data.phase);
+  syncEditUI(data.phase);
   setProgress(data.progress || 0);
 }
 
 function setButtonsForPhase(phase) {
-  const btnCapture = document.getElementById("btn-capture");
-  const btnRun     = document.getElementById("btn-run");
-  const btnCancel  = document.getElementById("btn-cancel");
-  const progWrap   = document.getElementById("progress-bar-wrap");
+  const cap      = document.getElementById("btn-capture-image");
+  const gen      = document.getElementById("btn-generate");
+  const retake   = document.getElementById("btn-retake");
+  const btnRun   = document.getElementById("btn-run");
+  const btnCancel = document.getElementById("btn-cancel");
+  const progWrap = document.getElementById("progress-bar-wrap");
 
-  btnCapture.disabled = !(phase === "previewing" || phase === "captured" || phase === "done");
-  btnRun.disabled     = !(phase === "captured" || phase === "done");
-  btnCancel.classList.toggle("hidden", phase !== "executing");
-  progWrap.classList.toggle("hidden", phase !== "executing");
+  const inEdit     = phase === "editing" || phase === "captured" || phase === "done";
+  const executing  = phase === "executing";
+
+  cap.classList.toggle("hidden", inEdit || executing);
+  cap.disabled = phase !== "previewing";
+
+  retake.classList.toggle("hidden", !(inEdit && !executing));
+  gen.classList.toggle("hidden", !(inEdit && !executing));
+
+  btnRun.disabled = !((phase === "captured" || phase === "done") && !executing);
+  btnCancel.classList.toggle("hidden", !executing);
+  progWrap.classList.toggle("hidden", !executing);
 }
 
 function setProgress(value) {
@@ -408,8 +428,10 @@ document.getElementById("btn-confirm-ws").addEventListener("click", () => {
 document.getElementById("btn-ws-redefine").addEventListener("click", () => {
   sendWS({ type: "reset_workspace" });
   lastWorkspaceJson = null;
+  stillLoaded = false;
   buildWorkspaceViz(null);
   buildPathViz(null);
+  showLive();
   showSetupSteps();
 });
 
@@ -424,6 +446,9 @@ document.getElementById("btn-connect").addEventListener("click", () => {
 document.getElementById("btn-disconnect").addEventListener("click", () => {
   sendWS({ type: "disconnect" });
   showOverlay(false);
+  stillLoaded = false;
+  buildPathViz(null);
+  showLive();
 });
 
 document.getElementById("ip-input").addEventListener("keydown", (e) => {
@@ -437,12 +462,295 @@ document.getElementById("btn-simulate").addEventListener("click", () => {
   setHeaderStatus("robot", false, "Test mode: simulated workspace (no robot). Press Capture.");
 });
 
-/* ── Capture / Run / Cancel buttons ────────────────────────────────────── */
-document.getElementById("btn-capture").addEventListener("click", () => {
-  sendWS({ type: "capture" });
-  setHeaderStatus("robot", true, "Capturing drawing…");
+/* ── Capture image / Edit / Generate / Retake ──────────────────────────── */
+const stillContainer = document.getElementById("still-container");
+const stillImg       = document.getElementById("still-img");
+const cropBox        = document.getElementById("crop-box");
+const previewImg     = document.getElementById("preview-img");
+const previewToggle  = document.getElementById("preview-toggle");
+const editPanel      = document.getElementById("edit-panel");
+const feedRaw        = document.getElementById("camera-feed-raw");
+const feedCanny      = document.getElementById("camera-feed-canny");
+const labelRaw       = document.getElementById("label-raw");
+const labelProcessed = document.getElementById("label-processed");
+
+let stillLoaded  = false;
+let previewMode  = "edges";                       // "edges" | "adjusted"
+let lastPreview  = { edges: null, adjusted: null };
+let crop         = { x: 0, y: 0, w: 1, h: 1 };    // normalized to displayed image
+
+/* Show/hide live feeds vs. the captured-still editing UI. Idempotent — safe to
+   call every state broadcast. */
+function showLive() {
+  feedRaw.classList.remove("hidden");
+  feedCanny.classList.remove("hidden");
+  stillContainer.classList.add("hidden");
+  previewImg.classList.add("hidden");
+  previewToggle.classList.add("hidden");
+  editPanel.classList.add("hidden");
+  labelRaw.textContent       = "Live";
+  labelProcessed.textContent = "Canny";
+}
+
+function showEditing(phase) {
+  feedRaw.classList.add("hidden");
+  feedCanny.classList.add("hidden");
+  stillContainer.classList.remove("hidden");
+  previewImg.classList.remove("hidden");
+  previewToggle.classList.remove("hidden");
+  editPanel.classList.toggle("hidden", phase === "executing");
+  labelRaw.textContent       = "Captured";
+  labelProcessed.textContent = previewMode === "edges" ? "Edges" : "Adjusted";
+}
+
+function syncEditUI(phase) {
+  if (phase === "previewing" || phase === "idle" || !stillLoaded) {
+    if (!stillLoaded) return showLive();
+    if (phase === "previewing" || phase === "idle") return showLive();
+  }
+  showEditing(phase);
+}
+
+/* ── Capture / Retake / Generate ───────────────────────────────────────── */
+document.getElementById("btn-capture-image").addEventListener("click", () => {
+  sendWS({ type: "capture_image" });
+  setHeaderStatus("robot", true, "Capturing still…");
 });
 
+document.getElementById("btn-retake").addEventListener("click", () => {
+  stillLoaded = false;
+  buildPathViz(null);
+  showLive();
+  sendWS({ type: "retake" });
+  setHeaderStatus("robot", true, "Back to live feed.");
+});
+
+document.getElementById("btn-generate").addEventListener("click", () => {
+  sendWS({ type: "generate_path", params: buildParams() });
+  setHeaderStatus("robot", true, "Generating tool path…");
+});
+
+/* ── Incoming still + preview ──────────────────────────────────────────── */
+function handleStill(data) {
+  if (!data.image) return;
+  stillLoaded = true;
+  previewImg.src = "";
+  lastPreview = { edges: null, adjusted: null };
+  crop = { x: 0, y: 0, w: 1, h: 1 };
+
+  // onload only re-lays-out the crop box. It must NOT trigger another adjust,
+  // because every preview swaps stillImg.src (below) which re-fires onload.
+  stillImg.onload = renderCrop;
+  stillImg.src = data.image;            // show the raw frame instantly…
+  cropBox.classList.remove("hidden");
+  showEditing("editing");
+  requestAdjust(true);                  // …then fetch the adjusted version
+  setHeaderStatus("robot", true, "Crop and adjust, then Generate Path.");
+}
+
+function handlePreview(data) {
+  lastPreview.adjusted = data.adjusted || lastPreview.adjusted;
+  lastPreview.edges    = data.edges    || lastPreview.edges;
+
+  // Left "Captured" panel always shows the live tuned image so brightness /
+  // contrast / etc. are immediately visible as you drag the sliders.
+  if (data.adjusted && stillLoaded) stillImg.src = data.adjusted;
+
+  applyPreviewMode();
+}
+
+function applyPreviewMode() {
+  const url = lastPreview[previewMode];
+  if (url) previewImg.src = url;
+  labelProcessed.textContent = previewMode === "edges" ? "Edges" : "Adjusted";
+}
+
+previewToggle.querySelectorAll(".seg").forEach(btn => {
+  btn.addEventListener("click", () => {
+    previewMode = btn.dataset.mode;
+    previewToggle.querySelectorAll(".seg").forEach(b =>
+      b.classList.toggle("active", b === btn));
+    applyPreviewMode();
+  });
+});
+
+/* ── Adjustment sliders ────────────────────────────────────────────────── */
+function adjRows() { return document.querySelectorAll(".adj-row[data-key]"); }
+
+function initAdjustControls() {
+  adjRows().forEach(row => {
+    const input = row.querySelector("input[type=range]");
+    input.min   = row.dataset.min;
+    input.max   = row.dataset.max;
+    input.step  = row.dataset.step;
+    input.value = row.dataset.default;
+    updateAdjVal(row);
+    input.addEventListener("input", () => { updateAdjVal(row); requestAdjust(); });
+  });
+  document.getElementById("chk-clahe").addEventListener("change", () => requestAdjust());
+  document.getElementById("chk-invert").addEventListener("change", () => requestAdjust());
+  document.getElementById("chk-auto-canny").addEventListener("change", () => requestAdjust());
+
+  document.getElementById("btn-auto").addEventListener("click", () => {
+    const on = !autoEnabled();
+    setAuto(on);
+    // One click should fully reveal grooves: also auto-pick edge thresholds.
+    document.getElementById("chk-auto-canny").checked = on;
+    requestAdjust(true);
+  });
+}
+
+function autoEnabled() {
+  return document.getElementById("btn-auto").classList.contains("active");
+}
+
+function setAuto(on) {
+  const btn = document.getElementById("btn-auto");
+  btn.classList.toggle("active", on);
+  btn.textContent = on ? "✨ Auto Touch-Up: ON" : "✨ Auto Touch-Up";
+}
+
+function updateAdjVal(row) {
+  const input = row.querySelector("input[type=range]");
+  const span  = row.querySelector(".adj-val");
+  const step  = parseFloat(row.dataset.step);
+  span.textContent = step < 1 ? parseFloat(input.value).toFixed(2) : input.value;
+}
+
+function readAdjustments() {
+  const adj = {};
+  adjRows().forEach(row => {
+    adj[row.dataset.key] = parseFloat(row.querySelector("input[type=range]").value);
+  });
+  adj.clahe      = document.getElementById("chk-clahe").checked;
+  adj.invert     = document.getElementById("chk-invert").checked;
+  adj.auto       = autoEnabled();
+  adj.auto_canny = document.getElementById("chk-auto-canny").checked;
+  return adj;
+}
+
+function cropForSend() {
+  const c = crop;
+  if (c.w <= 0.001 || c.h <= 0.001) return { x: 0, y: 0, w: 1, h: 1 };
+  return { x: c.x, y: c.y, w: c.w, h: c.h };
+}
+
+function buildParams() {
+  return { crop: cropForSend(), adjustments: readAdjustments() };
+}
+
+let adjustTimer = null;
+function requestAdjust(immediate) {
+  if (!stillLoaded) return;
+  if (adjustTimer) clearTimeout(adjustTimer);
+  const fire = () => sendWS({ type: "preview_adjust", params: buildParams() });
+  if (immediate) fire();
+  else adjustTimer = setTimeout(fire, 120);
+}
+
+document.getElementById("btn-reset-adjust").addEventListener("click", () => {
+  adjRows().forEach(row => {
+    const input = row.querySelector("input[type=range]");
+    input.value = row.dataset.default;
+    updateAdjVal(row);
+  });
+  document.getElementById("chk-clahe").checked  = false;
+  document.getElementById("chk-invert").checked = false;
+  document.getElementById("chk-auto-canny").checked = false;
+  setAuto(false);
+  requestAdjust(true);
+});
+
+document.getElementById("btn-crop-reset").addEventListener("click", () => {
+  crop = { x: 0, y: 0, w: 1, h: 1 };
+  renderCrop();
+  requestAdjust(true);
+});
+
+/* ── Crop overlay (drag to draw / move / resize) ───────────────────────── */
+function imgContentRect() {
+  const cr = stillContainer.getBoundingClientRect();
+  const ir = stillImg.getBoundingClientRect();
+  return { ox: ir.left - cr.left, oy: ir.top - cr.top, w: ir.width, h: ir.height };
+}
+
+function renderCrop() {
+  if (!stillLoaded) return;
+  const r = imgContentRect();
+  cropBox.style.left   = (r.ox + crop.x * r.w) + "px";
+  cropBox.style.top    = (r.oy + crop.y * r.h) + "px";
+  cropBox.style.width  = (crop.w * r.w) + "px";
+  cropBox.style.height = (crop.h * r.h) + "px";
+}
+
+function clamp01(v) { return Math.min(Math.max(v, 0), 1); }
+
+function ptNorm(e) {
+  const ir = stillImg.getBoundingClientRect();
+  return {
+    x: clamp01((e.clientX - ir.left) / ir.width),
+    y: clamp01((e.clientY - ir.top)  / ir.height),
+  };
+}
+
+let dragMode = null, dragStart = null, cropStart = null;
+
+stillContainer.addEventListener("mousedown", (e) => {
+  if (!stillLoaded) return;
+  const handle = e.target.closest(".crop-handle");
+  const p = ptNorm(e);
+  if (handle) {
+    dragMode = handle.dataset.h;
+  } else if (p.x >= crop.x && p.x <= crop.x + crop.w &&
+             p.y >= crop.y && p.y <= crop.y + crop.h) {
+    dragMode = "move";
+  } else {
+    dragMode = "new";
+    crop = { x: p.x, y: p.y, w: 0, h: 0 };
+  }
+  dragStart = p;
+  cropStart = { ...crop };
+  e.preventDefault();
+  window.addEventListener("mousemove", onCropMove);
+  window.addEventListener("mouseup", onCropUp);
+});
+
+function onCropMove(e) {
+  const p = ptNorm(e);
+  if (dragMode === "new") {
+    crop.x = Math.min(dragStart.x, p.x);
+    crop.y = Math.min(dragStart.y, p.y);
+    crop.w = Math.abs(p.x - dragStart.x);
+    crop.h = Math.abs(p.y - dragStart.y);
+  } else if (dragMode === "move") {
+    crop.x = clamp01(Math.min(cropStart.x + (p.x - dragStart.x), 1 - cropStart.w));
+    crop.y = clamp01(Math.min(cropStart.y + (p.y - dragStart.y), 1 - cropStart.h));
+  } else {
+    let x0 = cropStart.x, y0 = cropStart.y;
+    let x1 = cropStart.x + cropStart.w, y1 = cropStart.y + cropStart.h;
+    if (dragMode.includes("w")) x0 = p.x;
+    if (dragMode.includes("e")) x1 = p.x;
+    if (dragMode.includes("n")) y0 = p.y;
+    if (dragMode.includes("s")) y1 = p.y;
+    crop.x = Math.min(x0, x1); crop.w = Math.abs(x1 - x0);
+    crop.y = Math.min(y0, y1); crop.h = Math.abs(y1 - y0);
+  }
+  cropBox.classList.remove("hidden");
+  renderCrop();
+}
+
+function onCropUp() {
+  window.removeEventListener("mousemove", onCropMove);
+  window.removeEventListener("mouseup", onCropUp);
+  if (crop.w < 0.01 || crop.h < 0.01) crop = { x: 0, y: 0, w: 1, h: 1 };
+  renderCrop();
+  requestAdjust(true);
+}
+
+new ResizeObserver(renderCrop).observe(stillContainer);
+initAdjustControls();
+
+/* ── Run / Cancel buttons ──────────────────────────────────────────────── */
 document.getElementById("btn-run").addEventListener("click", () => {
   sendWS({ type: "run" });
   setButtonsForPhase("executing");

@@ -28,15 +28,31 @@ def extract_from_frame(
     Full pipeline: BGR frame → ordered list of pixel-coordinate strokes.
 
     1. Greyscale → Gaussian blur → Canny
-    2. findContours (RETR_LIST, CHAIN_APPROX_NONE)
-    3. Filter short contours
+    2. 8-connectivity chain following
+    3. Filter short chains
     4. Resample to uniform spacing
     5. TSP nearest-neighbour ordering
     """
     gray    = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (CANNY_BLUR_KERNEL, CANNY_BLUR_KERNEL), 0)
     edges   = cv2.Canny(blurred, CANNY_THRESHOLD_LOW, CANNY_THRESHOLD_HIGH)
+    return extract_from_edges(edges, min_contour_pixels)
 
+
+def extract_from_edges(
+    edges: np.ndarray,
+    min_contour_pixels: int = CONTOUR_MIN_PIXELS,
+    offset: tuple[int, int] = (0, 0),
+) -> ExtractedPath:
+    """
+    Turn a binary Canny edge image into ordered, resampled pixel strokes.
+
+    Shared by extract_from_frame and the captured-still pipeline so the live
+    edit preview and the final path come from identical processing. ``offset``
+    (x0, y0) shifts every point back into full-frame pixel coordinates when the
+    edges were computed on a cropped sub-image, so the workspace mapping in
+    pixels_to_robot_coords stays correct.
+    """
     strokes = _chains_from_edges(edges, min_contour_pixels)
 
     if not strokes:
@@ -47,6 +63,10 @@ def extract_from_frame(
     strokes_smoothed  = [smooth_stroke(s) for s in strokes]
     strokes_resampled = [resample_stroke(s, spacing_px) for s in strokes_smoothed]
     strokes_ordered   = _order_strokes(strokes_resampled)
+
+    ox, oy = offset
+    if ox or oy:
+        strokes_ordered = [[(x + ox, y + oy) for x, y in s] for s in strokes_ordered]
 
     total_pts = sum(len(s) for s in strokes_ordered)
     return ExtractedPath(

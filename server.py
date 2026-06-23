@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import threading
 from pathlib import Path
@@ -40,7 +41,10 @@ class Server:
         on_reset_workspace: Optional[Callable] = None,
         on_simulate_workspace: Optional[Callable] = None,
         on_use_workspace: Optional[Callable] = None,
-        on_capture: Optional[Callable] = None,
+        on_capture_image: Optional[Callable] = None,
+        on_preview_adjust: Optional[Callable] = None,
+        on_generate_path: Optional[Callable] = None,
+        on_retake: Optional[Callable] = None,
         on_run: Optional[Callable] = None,
         on_cancel: Optional[Callable] = None,
         on_select_camera: Optional[Callable] = None,
@@ -58,7 +62,10 @@ class Server:
         self._on_reset_workspace = on_reset_workspace
         self._on_simulate_workspace = on_simulate_workspace
         self._on_use_workspace = on_use_workspace
-        self._on_capture = on_capture
+        self._on_capture_image = on_capture_image
+        self._on_preview_adjust = on_preview_adjust
+        self._on_generate_path = on_generate_path
+        self._on_retake = on_retake
         self._on_run = on_run
         self._on_cancel = on_cancel
         self._on_select_camera = on_select_camera
@@ -194,9 +201,21 @@ class Server:
             if self._on_simulate_workspace:
                 asyncio.create_task(self._on_simulate_workspace())
 
-        elif msg_type == "capture":
-            if self._on_capture:
-                asyncio.create_task(self._on_capture(ws))
+        elif msg_type == "capture_image":
+            if self._on_capture_image:
+                asyncio.create_task(self._on_capture_image(ws))
+
+        elif msg_type == "preview_adjust":
+            if self._on_preview_adjust:
+                asyncio.create_task(self._on_preview_adjust(ws, data.get("params", {})))
+
+        elif msg_type == "generate_path":
+            if self._on_generate_path:
+                asyncio.create_task(self._on_generate_path(ws, data.get("params", {})))
+
+        elif msg_type == "retake":
+            if self._on_retake:
+                asyncio.create_task(self._on_retake(ws))
 
         elif msg_type == "run":
             if self._on_run:
@@ -268,6 +287,36 @@ class Server:
                 "type": "workspace_status",
                 "loaded": loaded,
                 "workspace": workspace.to_browser_dict() if workspace is not None else None,
+            }))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _data_url(jpg: Optional[bytes]) -> Optional[str]:
+        if not jpg:
+            return None
+        return "data:image/jpeg;base64," + base64.b64encode(jpg).decode("ascii")
+
+    async def send_still(self, ws, jpg: Optional[bytes], width: int, height: int) -> None:
+        """Send the frozen still image (as a data URL) plus its pixel dimensions."""
+        try:
+            await ws.send_str(json.dumps({
+                "type": "still",
+                "image": self._data_url(jpg),
+                "width": width,
+                "height": height,
+            }))
+        except Exception:
+            pass
+
+    async def send_preview(self, ws, adjusted_jpg: Optional[bytes],
+                           edges_jpg: Optional[bytes]) -> None:
+        """Send the live edit preview: adjusted grayscale + Canny edges (data URLs)."""
+        try:
+            await ws.send_str(json.dumps({
+                "type": "preview",
+                "adjusted": self._data_url(adjusted_jpg),
+                "edges": self._data_url(edges_jpg),
             }))
         except Exception:
             pass

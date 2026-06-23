@@ -13,9 +13,13 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 
-from config import HTTP_HOST, HTTP_PORT, WORKSPACE_FILE, CAMERA_WIDTH, CAMERA_HEIGHT
+from config import (
+    HTTP_HOST, HTTP_PORT, WORKSPACE_FILE,
+    CAMERA_WIDTH, CAMERA_HEIGHT, CONTOUR_MIN_PIXELS,
+)
 from camera_thread import CameraThread
-from path_extractor import extract_from_frame, pixels_to_robot_coords
+from image_adjust import Adjustments, Crop, encode_jpeg, process_still
+from path_extractor import extract_from_edges, pixels_to_robot_coords
 from path_executor import PathExecutor
 from robot_controller import RobotController
 from server import Server
@@ -47,8 +51,10 @@ shared_state: dict = {
     "ws_points":          {"p0": None, "px": None, "py": None},
     "freedrive":          False,
     "ee":                 [0.0] * 6,
-    "phase":              "idle",      # idle|previewing|captured|executing|done|error
-    "strokes":            [],          # robot-space strokes after Capture
+    "phase":              "idle",      # idle|previewing|editing|captured|executing|done|error
+    "captured_still":     None,        # np.ndarray BGR — frozen frame for editing
+    "still_dims":         None,        # (width, height) of the captured still
+    "strokes":            [],          # robot-space strokes after Generate Path
     "executing":          False,
     "progress":           0.0,
     "available_cameras":  _available_cameras,
@@ -237,26 +243,76 @@ async def on_reset_workspace() -> None:
         shared_state["ws_points"]        = {"p0": None, "px": None, "py": None}
         shared_state["phase"]            = "idle"
         shared_state["strokes"]          = []
+        shared_state["captured_still"]   = None
+        shared_state["still_dims"]       = None
     print("Workspace reset — setup required again.")
 
 
-# ── Capture / Run / Cancel callbacks ─────────────────────────────────────────
-async def on_capture(ws) -> None:
-    with state_lock:
-        workspace = shared_state.get("workspace")
-
-    if workspace is None:
-        await server.send_capture_result(ws, False, error="No workspace configured.")
-        return
-
+# ── Capture image / Edit / Generate path callbacks ───────────────────────────
+async def on_capture_image(ws) -> None:
+    """Freeze the current camera frame as a still and enter the editing phase."""
     frame = camera_thread.capture_frame()
     if frame is None:
         await server.send_capture_result(ws, False, error="No camera frame available.")
         return
 
+    h, w = frame.shape[:2]
+    with state_lock:
+        shared_state["captured_still"] = frame
+        shared_state["still_dims"]     = (w, h)
+        shared_state["phase"]          = "editing"
+        shared_state["strokes"]        = []
+
+    loop = asyncio.get_running_loop()
+    jpg = await loop.run_in_executor(None, encode_jpeg, frame)
+    await server.send_still(ws, jpg, width=w, height=h)
+    print(f"Captured still: {w}×{h} — ready for crop/adjust")
+
+
+async def on_preview_adjust(ws, params: dict) -> None:
+    """Reprocess the captured still with the latest crop/adjustments → edge preview."""
+    with state_lock:
+        still = shared_state.get("captured_still")
+    if still is None:
+        return
+
+    crop = Crop.from_dict(params.get("crop"))
+    adj  = Adjustments.from_dict(params.get("adjustments"))
+
     loop = asyncio.get_running_loop()
     try:
-        extracted = await loop.run_in_executor(None, extract_from_frame, frame)
+        processed = await loop.run_in_executor(None, process_still, still, crop, adj)
+    except Exception as exc:
+        print(f"[preview] processing error: {exc}")
+        return
+
+    adjusted_jpg = await loop.run_in_executor(None, encode_jpeg, processed.full_adjusted)
+    edges_jpg    = await loop.run_in_executor(None, encode_jpeg, processed.edges)
+    await server.send_preview(ws, adjusted_jpg=adjusted_jpg, edges_jpg=edges_jpg)
+
+
+async def on_generate_path(ws, params: dict) -> None:
+    """Run path extraction on the cropped + adjusted still and build the 3D preview."""
+    with state_lock:
+        workspace = shared_state.get("workspace")
+        still     = shared_state.get("captured_still")
+
+    if workspace is None:
+        await server.send_capture_result(ws, False, error="No workspace configured.")
+        return
+    if still is None:
+        await server.send_capture_result(ws, False, error="No captured image — press Capture first.")
+        return
+
+    crop = Crop.from_dict(params.get("crop"))
+    adj  = Adjustments.from_dict(params.get("adjustments"))
+
+    loop = asyncio.get_running_loop()
+    try:
+        processed = await loop.run_in_executor(None, process_still, still, crop, adj)
+        extracted = await loop.run_in_executor(
+            None, extract_from_edges, processed.edges, CONTOUR_MIN_PIXELS, processed.origin
+        )
     except Exception as exc:
         await server.send_capture_result(ws, False, error=str(exc))
         return
@@ -273,7 +329,7 @@ async def on_capture(ws) -> None:
 
     with state_lock:
         shared_state["strokes"] = robot_strokes
-        shared_state["phase"]   = "captured" if robot_strokes else "previewing"
+        shared_state["phase"]   = "captured" if robot_strokes else "editing"
 
     await server.send_capture_result(
         ws,
@@ -282,7 +338,19 @@ async def on_capture(ws) -> None:
         point_count=extracted.total_points,
         strokes_data=strokes_data,
     )
-    print(f"Captured: {extracted.total_strokes} strokes, {extracted.total_points} points")
+    print(f"Generated path: {extracted.total_strokes} strokes, {extracted.total_points} points")
+
+
+async def on_retake(ws) -> None:
+    """Discard the captured still and return to the live preview phase."""
+    with state_lock:
+        shared_state["captured_still"] = None
+        shared_state["still_dims"]     = None
+        shared_state["strokes"]        = []
+        shared_state["phase"]          = "previewing"
+    if not camera_thread.running:
+        camera_thread.start()
+    print("Retake — back to live preview")
 
 
 async def on_run(ws) -> None:
@@ -329,7 +397,10 @@ server = Server(
     on_reset_workspace=on_reset_workspace,
     on_simulate_workspace=on_simulate_workspace,
     on_use_workspace=on_use_workspace,
-    on_capture=on_capture,
+    on_capture_image=on_capture_image,
+    on_preview_adjust=on_preview_adjust,
+    on_generate_path=on_generate_path,
+    on_retake=on_retake,
     on_run=on_run,
     on_cancel=on_cancel,
     on_select_camera=on_select_camera,

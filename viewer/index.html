@@ -21,18 +21,83 @@
     <div id="camera-column">
 
       <div class="panel" id="panel-camera-raw">
-        <div class="panel-label">Live</div>
+        <div class="panel-label" id="label-raw">Live</div>
         <div id="camera-selector">
           <select id="camera-select"><option value="" disabled selected>…</option></select>
         </div>
         <img id="camera-feed-raw" src="/camera" alt="raw camera feed" />
+
+        <!-- Captured still + crop overlay (shown while editing) -->
+        <div id="still-container" class="hidden">
+          <img id="still-img" alt="captured still" />
+          <div id="crop-box" class="hidden">
+            <div class="crop-handle" data-h="nw"></div>
+            <div class="crop-handle" data-h="ne"></div>
+            <div class="crop-handle" data-h="sw"></div>
+            <div class="crop-handle" data-h="se"></div>
+          </div>
+        </div>
       </div>
 
       <div class="panel" id="panel-camera-canny">
-        <div class="panel-label">Canny</div>
+        <div class="panel-label" id="label-processed">Canny</div>
+        <div id="preview-toggle" class="hidden">
+          <button id="btn-show-edges" class="seg active" data-mode="edges">Edges</button>
+          <button id="btn-show-adjusted" class="seg" data-mode="adjusted">Adjusted</button>
+        </div>
         <img id="camera-feed-canny" src="/camera/processed" alt="Canny edge feed" />
+        <img id="preview-img" class="hidden" alt="processed preview" />
       </div>
 
+    </div>
+
+    <!-- Image adjustment controls (shown while editing a captured still) -->
+    <div id="edit-panel" class="hidden">
+      <div id="edit-panel-header">
+        <span>Adjust Image</span>
+        <button id="btn-reset-adjust" title="Reset all adjustments">Reset</button>
+      </div>
+      <p id="edit-hint">Tune until the marking stands out as clean white edges, then Generate Path.</p>
+
+      <button id="btn-auto" class="auto-btn" title="Automatically stretch contrast, equalize, and sharpen relief to reveal grooves in the sand">✨ Auto Touch-Up</button>
+      <div class="adj-row" data-key="auto_strength" data-min="0" data-max="1" data-step="0.05" data-default="0.6">
+        <label>Auto strength</label><input type="range" /><span class="adj-val"></span></div>
+      <div class="adj-row adj-check">
+        <label><input type="checkbox" id="chk-auto-canny" /> Auto edge threshold</label></div>
+
+      <div class="adj-group-title">Crop</div>
+      <div class="adj-row">
+        <button id="btn-crop-reset" class="adj-btn">Reset Crop (full frame)</button>
+      </div>
+
+      <div class="adj-group-title">Tone</div>
+      <div class="adj-row" data-key="exposure"   data-min="-2"  data-max="2"   data-step="0.05" data-default="0">
+        <label>Exposure</label><input type="range" /><span class="adj-val"></span></div>
+      <div class="adj-row" data-key="brightness" data-min="-1"  data-max="1"   data-step="0.01" data-default="0">
+        <label>Brightness</label><input type="range" /><span class="adj-val"></span></div>
+      <div class="adj-row" data-key="contrast"   data-min="0"   data-max="3"   data-step="0.05" data-default="1">
+        <label>Contrast</label><input type="range" /><span class="adj-val"></span></div>
+      <div class="adj-row" data-key="highlights" data-min="-1"  data-max="1"   data-step="0.01" data-default="0">
+        <label>Highlights</label><input type="range" /><span class="adj-val"></span></div>
+      <div class="adj-row" data-key="shadows"    data-min="-1"  data-max="1"   data-step="0.01" data-default="0">
+        <label>Shadows</label><input type="range" /><span class="adj-val"></span></div>
+      <div class="adj-row" data-key="gamma"      data-min="0.2" data-max="3"   data-step="0.05" data-default="1">
+        <label>Gamma</label><input type="range" /><span class="adj-val"></span></div>
+
+      <div class="adj-row adj-check">
+        <label><input type="checkbox" id="chk-clahe" /> Local contrast (CLAHE)</label></div>
+      <div class="adj-row" data-key="clahe_clip" data-min="0.1" data-max="10"  data-step="0.1"  data-default="2">
+        <label>CLAHE strength</label><input type="range" /><span class="adj-val"></span></div>
+      <div class="adj-row adj-check">
+        <label><input type="checkbox" id="chk-invert" /> Invert (light marks on dark)</label></div>
+
+      <div class="adj-group-title">Edge detection</div>
+      <div class="adj-row" data-key="blur"       data-min="1"   data-max="31"  data-step="2"    data-default="5">
+        <label>Blur</label><input type="range" /><span class="adj-val"></span></div>
+      <div class="adj-row" data-key="canny_low"  data-min="0"   data-max="500" data-step="1"    data-default="50">
+        <label>Canny low</label><input type="range" /><span class="adj-val"></span></div>
+      <div class="adj-row" data-key="canny_high" data-min="0"   data-max="500" data-step="1"    data-default="150">
+        <label>Canny high</label><input type="range" /><span class="adj-val"></span></div>
     </div>
 
     <!-- Right column: Three.js path viewer -->
@@ -144,7 +209,9 @@
 
     <div class="footer-group">
       <button id="btn-simulate" title="Set a synthetic workspace to test the vision pipeline without a robot">Test Mode (no robot)</button>
-      <button id="btn-capture" disabled>Capture</button>
+      <button id="btn-capture-image" disabled title="Freeze the current camera frame for cropping and adjustment">Capture Image</button>
+      <button id="btn-retake" class="hidden" title="Discard the still and go back to the live feed">Retake</button>
+      <button id="btn-generate" class="hidden" title="Crop + adjustments → tool path">Generate Path</button>
       <button id="btn-run" disabled>Run</button>
       <button id="btn-cancel" class="hidden btn-cancel">Cancel</button>
     </div>
