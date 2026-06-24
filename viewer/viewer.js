@@ -607,7 +607,7 @@ function autoEnabled() {
 function setAuto(on) {
   const btn = document.getElementById("btn-auto");
   btn.classList.toggle("active", on);
-  btn.textContent = on ? "✨ Auto Touch-Up: ON" : "✨ Auto Touch-Up";
+  btn.textContent = on ? "Auto Touch-Up: ON" : "Auto Touch-Up";
 }
 
 function updateAdjVal(row) {

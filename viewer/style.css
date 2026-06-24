@@ -208,6 +208,17 @@ main {
   margin-bottom: 2px;
 }
 
+.adj-note {
+  font-size: 10px;
+  color: #6f7783;
+  line-height: 1.5;
+  margin: 1px 0 4px;
+}
+.adj-note b {
+  color: #9aa4b0;
+  font-weight: 600;
+}
+
 .adj-group-title {
   font-size: 9px;
   text-transform: uppercase;

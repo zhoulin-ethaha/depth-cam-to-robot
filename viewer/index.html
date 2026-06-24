@@ -57,13 +57,33 @@
         <span>Adjust Image</span>
         <button id="btn-reset-adjust" title="Reset all adjustments">Reset</button>
       </div>
-      <p id="edit-hint">Tune until the marking stands out as clean white edges, then Generate Path.</p>
+      <p id="edit-hint">Tune until the marking stands out as clean white edges, then Generate Path. The left panel shows the grayscale image the edge detector actually sees; the right panel shows the resulting edges.</p>
 
-      <button id="btn-auto" class="auto-btn" title="Automatically stretch contrast, equalize, and sharpen relief to reveal grooves in the sand">✨ Auto Touch-Up</button>
+      <div class="adj-group-title">Auto</div>
+      <button id="btn-auto" class="auto-btn" title="Automatically stretch contrast, equalize, and sharpen relief to reveal grooves in the sand">Auto Touch-Up</button>
+      <p class="adj-note">
+        One click to reveal faint relief (e.g. grooves raked in sand). It runs four
+        steps on the captured frame:
+        <b>contrast stretch</b> (remaps the darkest 1% and brightest 1% of pixels to
+        pure black and white, spreading a flat surface's narrow tonal band across the
+        full range);
+        <b>denoise</b> (an edge-preserving smooth that removes sand grain but keeps
+        groove edges);
+        <b>local contrast / CLAHE</b> (boosts contrast in small tiles so faint texture
+        pops everywhere, not just where it's well-lit); and
+        <b>relief sharpen</b> (an unsharp mask that amplifies the fine ridges).
+      </p>
       <div class="adj-row" data-key="auto_strength" data-min="0" data-max="1" data-step="0.05" data-default="0.6">
         <label>Auto strength</label><input type="range" /><span class="adj-val"></span></div>
+      <p class="adj-note">Scales how hard the CLAHE and sharpen steps push — higher reveals
+        more, but also amplifies noise. Lower it (or raise Blur below) if the edges get speckly.</p>
+
       <div class="adj-row adj-check">
         <label><input type="checkbox" id="chk-auto-canny" /> Auto edge threshold</label></div>
+      <p class="adj-note">Picks the Canny low/high thresholds automatically from the image's
+        median brightness (low ≈ 0.66×median, high ≈ 1.33×median) instead of the fixed
+        sliders below — so edges track the image's exposure without manual tuning. Turn it
+        off to set Canny low/high by hand.</p>
 
       <div class="adj-group-title">Crop</div>
       <div class="adj-row">
