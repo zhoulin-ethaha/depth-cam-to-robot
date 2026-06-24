@@ -230,7 +230,7 @@ function handleCaptureResult(data) {
     buildPathViz(null);
     setButtonsForPhase("editing");
     setHeaderStatus("robot", false,
-      "No edges found — adjust contrast / Canny thresholds and try again.");
+      "No grooves found — lower Groove depth / adjust detection and try again.");
   }
 }
 
@@ -475,8 +475,8 @@ const labelRaw       = document.getElementById("label-raw");
 const labelProcessed = document.getElementById("label-processed");
 
 let stillLoaded  = false;
-let previewMode  = "edges";                       // "edges" | "adjusted"
-let lastPreview  = { edges: null, adjusted: null };
+let previewMode  = "grooves";                     // "grooves" | "depth"
+let lastPreview  = { grooves: null, depth: null };
 let crop         = { x: 0, y: 0, w: 1, h: 1 };    // normalized to displayed image
 
 /* Show/hide live feeds vs. the captured-still editing UI. Idempotent — safe to
@@ -488,8 +488,8 @@ function showLive() {
   previewImg.classList.add("hidden");
   previewToggle.classList.add("hidden");
   editPanel.classList.add("hidden");
-  labelRaw.textContent       = "Live";
-  labelProcessed.textContent = "Canny";
+  labelRaw.textContent       = "Depth";
+  labelProcessed.textContent = "Grooves";
 }
 
 function showEditing(phase) {
@@ -500,7 +500,7 @@ function showEditing(phase) {
   previewToggle.classList.remove("hidden");
   editPanel.classList.toggle("hidden", phase === "executing");
   labelRaw.textContent       = "Captured";
-  labelProcessed.textContent = previewMode === "edges" ? "Edges" : "Adjusted";
+  labelProcessed.textContent = previewMode === "grooves" ? "Grooves" : "Depth";
 }
 
 function syncEditUI(phase) {
@@ -535,7 +535,7 @@ function handleStill(data) {
   if (!data.image) return;
   stillLoaded = true;
   previewImg.src = "";
-  lastPreview = { edges: null, adjusted: null };
+  lastPreview = { grooves: null, depth: null };
   crop = { x: 0, y: 0, w: 1, h: 1 };
 
   // onload only re-lays-out the crop box. It must NOT trigger another adjust,
@@ -549,12 +549,12 @@ function handleStill(data) {
 }
 
 function handlePreview(data) {
-  lastPreview.adjusted = data.adjusted || lastPreview.adjusted;
-  lastPreview.edges    = data.edges    || lastPreview.edges;
+  lastPreview.depth   = data.depth   || lastPreview.depth;
+  lastPreview.grooves = data.grooves || lastPreview.grooves;
 
-  // Left "Captured" panel always shows the live tuned image so brightness /
-  // contrast / etc. are immediately visible as you drag the sliders.
-  if (data.adjusted && stillLoaded) stillImg.src = data.adjusted;
+  // Left "Captured" panel always shows the colorized depth so the view range /
+  // crop are immediately visible as you tune.
+  if (data.depth && stillLoaded) stillImg.src = data.depth;
 
   applyPreviewMode();
 }
@@ -562,7 +562,7 @@ function handlePreview(data) {
 function applyPreviewMode() {
   const url = lastPreview[previewMode];
   if (url) previewImg.src = url;
-  labelProcessed.textContent = previewMode === "edges" ? "Edges" : "Adjusted";
+  labelProcessed.textContent = previewMode === "grooves" ? "Grooves" : "Depth";
 }
 
 previewToggle.querySelectorAll(".seg").forEach(btn => {
@@ -587,27 +587,7 @@ function initAdjustControls() {
     updateAdjVal(row);
     input.addEventListener("input", () => { updateAdjVal(row); requestAdjust(); });
   });
-  document.getElementById("chk-clahe").addEventListener("change", () => requestAdjust());
-  document.getElementById("chk-invert").addEventListener("change", () => requestAdjust());
-  document.getElementById("chk-auto-canny").addEventListener("change", () => requestAdjust());
-
-  document.getElementById("btn-auto").addEventListener("click", () => {
-    const on = !autoEnabled();
-    setAuto(on);
-    // One click should fully reveal grooves: also auto-pick edge thresholds.
-    document.getElementById("chk-auto-canny").checked = on;
-    requestAdjust(true);
-  });
-}
-
-function autoEnabled() {
-  return document.getElementById("btn-auto").classList.contains("active");
-}
-
-function setAuto(on) {
-  const btn = document.getElementById("btn-auto");
-  btn.classList.toggle("active", on);
-  btn.textContent = on ? "Auto Touch-Up: ON" : "Auto Touch-Up";
+  document.getElementById("detect-mode").addEventListener("change", () => requestAdjust(true));
 }
 
 function updateAdjVal(row) {
@@ -622,10 +602,7 @@ function readAdjustments() {
   adjRows().forEach(row => {
     adj[row.dataset.key] = parseFloat(row.querySelector("input[type=range]").value);
   });
-  adj.clahe      = document.getElementById("chk-clahe").checked;
-  adj.invert     = document.getElementById("chk-invert").checked;
-  adj.auto       = autoEnabled();
-  adj.auto_canny = document.getElementById("chk-auto-canny").checked;
+  adj.detect = document.getElementById("detect-mode").value;
   return adj;
 }
 
@@ -654,10 +631,7 @@ document.getElementById("btn-reset-adjust").addEventListener("click", () => {
     input.value = row.dataset.default;
     updateAdjVal(row);
   });
-  document.getElementById("chk-clahe").checked  = false;
-  document.getElementById("chk-invert").checked = false;
-  document.getElementById("chk-auto-canny").checked = false;
-  setAuto(false);
+  document.getElementById("detect-mode").value = "valley";
   requestAdjust(true);
 });
 
@@ -762,33 +736,3 @@ document.getElementById("btn-cancel").addEventListener("click", () => {
   sendWS({ type: "cancel" });
   setHeaderStatus("robot", true, "Cancelling…");
 });
-
-document.getElementById("camera-select").addEventListener("change", (e) => {
-  sendWS({ type: "select_camera", index: parseInt(e.target.value) });
-});
-
-async function loadCameras() {
-  const sel = document.getElementById("camera-select");
-  sel.innerHTML = "";
-  try {
-    const res  = await fetch("/cameras");
-    const idxs = await res.json();
-    if (idxs.length === 0) throw new Error("no cameras");
-    idxs.sort((a, b) => a - b);
-    idxs.forEach(i => {
-      const opt = document.createElement("option");
-      opt.value = i;
-      opt.textContent = `Camera ${i}`;
-      sel.appendChild(opt);
-    });
-    sel.value = idxs[0];
-  } catch {
-    const opt = document.createElement("option");
-    opt.value = 0;
-    opt.textContent = "Camera 0";
-    sel.appendChild(opt);
-    sel.value = 0;
-  }
-}
-
-loadCameras();

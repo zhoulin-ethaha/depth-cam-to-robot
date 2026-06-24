@@ -14,11 +14,12 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from config import (
-    HTTP_HOST, HTTP_PORT, WORKSPACE_FILE,
-    CAMERA_WIDTH, CAMERA_HEIGHT, CONTOUR_MIN_PIXELS,
+    HTTP_HOST, HTTP_PORT, WORKSPACE_FILE, CONTOUR_MIN_PIXELS,
 )
-from camera_thread import CameraThread
-from image_adjust import Adjustments, Crop, encode_jpeg, process_still
+from camera_thread import DepthCameraThread
+from depth_extractor import (
+    Crop, DepthGrooveParams, colorize_depth, encode_jpeg, process_depth,
+)
 from path_extractor import extract_from_edges, pixels_to_robot_coords
 from path_executor import PathExecutor
 from robot_controller import RobotController
@@ -26,44 +27,28 @@ from server import Server
 from settings import load_settings, save_settings
 from workspace import WorkspaceConfig
 
-def _enumerate_cameras() -> list[int]:
-    """Probe camera indices 0-7, return those that open successfully."""
-    import cv2
-    found = []
-    for i in range(8):
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            found.append(i)
-            cap.release()
-    print(f"[camera] available indices: {found}")
-    return found
-
-
-_available_cameras = _enumerate_cameras()
-
 # ── Shared state ──────────────────────────────────────────────────────────────
 shared_state: dict = {
-    "robot_connected":    False,
-    "last_frame_raw_jpg": None,
-    "last_frame_canny_jpg": None,
-    "workspace":          None,   # WorkspaceConfig | None — confirmed workspace
-    "pending_workspace":  None,   # WorkspaceConfig | None — loaded from disk
-    "ws_points":          {"p0": None, "px": None, "py": None},
-    "freedrive":          False,
-    "ee":                 [0.0] * 6,
-    "phase":              "idle",      # idle|previewing|editing|captured|executing|done|error
-    "captured_still":     None,        # np.ndarray BGR — frozen frame for editing
-    "still_dims":         None,        # (width, height) of the captured still
-    "strokes":            [],          # robot-space strokes after Generate Path
-    "executing":          False,
-    "progress":           0.0,
-    "available_cameras":  _available_cameras,
+    "robot_connected":     False,
+    "last_depth_color_jpg": None,    # colorized depth (live view)
+    "last_groove_jpg":     None,     # detected grooves (live preview)
+    "workspace":           None,     # WorkspaceConfig | None — confirmed workspace
+    "pending_workspace":   None,     # WorkspaceConfig | None — loaded from disk
+    "ws_points":           {"p0": None, "px": None, "py": None},
+    "freedrive":           False,
+    "ee":                  [0.0] * 6,
+    "phase":               "idle",     # idle|previewing|editing|captured|executing|done|error
+    "captured_still":      None,       # (depth_m, valid) — frozen averaged depth frame
+    "still_dims":          None,       # (width, height) of the captured still
+    "strokes":             [],         # robot-space strokes after Generate Path
+    "executing":           False,
+    "progress":            0.0,
 }
 state_lock = threading.Lock()
 
 # ── Singletons ────────────────────────────────────────────────────────────────
 robot         = RobotController()
-camera_thread = CameraThread(shared_state, state_lock)
+camera_thread = DepthCameraThread(shared_state, state_lock)
 path_executor = PathExecutor(robot, shared_state, state_lock)
 
 
@@ -215,7 +200,7 @@ async def on_use_workspace() -> None:
 
 async def on_simulate_workspace() -> None:
     """
-    Set a synthetic workspace so the Canny→vector→Path-Preview pipeline can be
+    Set a synthetic workspace so the depth→groove→Path-Preview pipeline can be
     tested without a robot. Does not connect or move the robot; Run remains
     gated on a real connection.
     """
@@ -250,75 +235,81 @@ async def on_reset_workspace() -> None:
 
 # ── Capture image / Edit / Generate path callbacks ───────────────────────────
 async def on_capture_image(ws) -> None:
-    """Freeze the current camera frame as a still and enter the editing phase."""
-    frame = camera_thread.capture_frame()
-    if frame is None:
-        await server.send_capture_result(ws, False, error="No camera frame available.")
+    """Freeze a temporally averaged depth frame as a still and enter editing."""
+    captured = camera_thread.capture_frame()
+    if captured is None:
+        await server.send_capture_result(ws, False, error="No depth frame available.")
         return
 
-    h, w = frame.shape[:2]
+    depth_m, valid = captured
+    h, w = depth_m.shape[:2]
     with state_lock:
-        shared_state["captured_still"] = frame
+        shared_state["captured_still"] = (depth_m, valid)
         shared_state["still_dims"]     = (w, h)
         shared_state["phase"]          = "editing"
         shared_state["strokes"]        = []
 
     loop = asyncio.get_running_loop()
-    jpg = await loop.run_in_executor(None, encode_jpeg, frame)
+    color = await loop.run_in_executor(None, colorize_depth, depth_m, valid)
+    jpg = await loop.run_in_executor(None, encode_jpeg, color)
     await server.send_still(ws, jpg, width=w, height=h)
-    print(f"Captured still: {w}×{h} — ready for crop/adjust")
+    print(f"Captured depth still: {w}×{h} — ready for crop/adjust")
 
 
 async def on_preview_adjust(ws, params: dict) -> None:
-    """Reprocess the captured still with the latest crop/adjustments → edge preview."""
+    """Reprocess the captured depth with the latest crop/groove params → preview."""
     with state_lock:
         still = shared_state.get("captured_still")
     if still is None:
         return
 
-    crop = Crop.from_dict(params.get("crop"))
-    adj  = Adjustments.from_dict(params.get("adjustments"))
+    depth_m, valid = still
+    crop   = Crop.from_dict(params.get("crop"))
+    gp     = DepthGrooveParams.from_dict(params.get("adjustments"))
 
     loop = asyncio.get_running_loop()
     try:
-        processed = await loop.run_in_executor(None, process_still, still, crop, adj)
+        processed = await loop.run_in_executor(None, process_depth, depth_m, valid, crop, gp)
     except Exception as exc:
         print(f"[preview] processing error: {exc}")
         return
 
-    adjusted_jpg = await loop.run_in_executor(None, encode_jpeg, processed.full_adjusted)
-    edges_jpg    = await loop.run_in_executor(None, encode_jpeg, processed.edges)
-    await server.send_preview(ws, adjusted_jpg=adjusted_jpg, edges_jpg=edges_jpg)
+    depth_jpg   = await loop.run_in_executor(None, encode_jpeg, processed.color_full)
+    grooves_jpg = await loop.run_in_executor(None, encode_jpeg, processed.grooves)
+    await server.send_preview(ws, depth_jpg=depth_jpg, grooves_jpg=grooves_jpg)
 
 
 async def on_generate_path(ws, params: dict) -> None:
-    """Run path extraction on the cropped + adjusted still and build the 3D preview."""
+    """Run groove extraction on the cropped depth and build the 3D path preview."""
     with state_lock:
         workspace = shared_state.get("workspace")
         still     = shared_state.get("captured_still")
+        dims      = shared_state.get("still_dims")
 
     if workspace is None:
         await server.send_capture_result(ws, False, error="No workspace configured.")
         return
     if still is None:
-        await server.send_capture_result(ws, False, error="No captured image — press Capture first.")
+        await server.send_capture_result(ws, False, error="No captured depth — press Capture first.")
         return
 
+    depth_m, valid = still
+    width, height  = dims
     crop = Crop.from_dict(params.get("crop"))
-    adj  = Adjustments.from_dict(params.get("adjustments"))
+    gp   = DepthGrooveParams.from_dict(params.get("adjustments"))
 
     loop = asyncio.get_running_loop()
     try:
-        processed = await loop.run_in_executor(None, process_still, still, crop, adj)
+        processed = await loop.run_in_executor(None, process_depth, depth_m, valid, crop, gp)
         extracted = await loop.run_in_executor(
-            None, extract_from_edges, processed.edges, CONTOUR_MIN_PIXELS, processed.origin
+            None, extract_from_edges, processed.grooves, CONTOUR_MIN_PIXELS, processed.origin
         )
     except Exception as exc:
         await server.send_capture_result(ws, False, error=str(exc))
         return
 
     robot_strokes = pixels_to_robot_coords(
-        extracted.strokes, workspace, CAMERA_WIDTH, CAMERA_HEIGHT, draw_z_offset=0.0
+        extracted.strokes, workspace, width, height, draw_z_offset=0.0
     )
 
     # Convert to serialisable list-of-lists for the browser's 3D preview
@@ -375,13 +366,6 @@ async def on_cancel(ws) -> None:
     print("[executor] cancel requested")
 
 
-async def on_select_camera(index: int) -> None:
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, camera_thread.stop)
-    await loop.run_in_executor(None, camera_thread.start, index)
-    print(f"[camera] switched to index {index}")
-
-
 # ── Entry point ───────────────────────────────────────────────────────────────
 server = Server(
     shared_state,
@@ -403,7 +387,6 @@ server = Server(
     on_retake=on_retake,
     on_run=on_run,
     on_cancel=on_cancel,
-    on_select_camera=on_select_camera,
 )
 
 # Camera starts immediately so both MJPEG feeds are live from the moment you open the browser

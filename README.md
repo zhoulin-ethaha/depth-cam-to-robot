@@ -1,40 +1,58 @@
-# camera-to-robot
+# depth-cam-to-robot
 
-Turn any webcam image into a UR robot drawing. Point the camera at an object or sketch, click **Capture Image**, crop and adjust the still until the marking stands out, click **Generate Path**, then **Run** — the robot traces every detected edge with a pen.
+Turn hand-drawn grooves raked into sand into a UR robot drawing. An Intel RealSense
+depth camera looks straight down at the sandbox, you click **Capture Image**, tune
+the groove detection until the marks stand out as clean centrelines, click **Generate
+Path**, then **Run** — the robot retraces every groove with a pen (or rake tool).
 
-The capture/adjust step is built for *subtle* subjects — e.g. shallow markings raked into a sandbox — where the signal is barely above the background. You freeze a frame, crop to the area of interest, and tune exposure / brightness / contrast / highlights / shadows / gamma / local contrast (CLAHE) / invert plus the Canny thresholds, with a live edge preview, before committing to a tool path.
+Grooves are a *few-millimetre physical depression*. An RGB camera can't see them —
+the shading is far too subtle, even after aggressive contrast touch-up — but a depth
+camera measures them directly. This project works on the raw metric depth the
+RealSense reports, colorizing it only for display.
 
 ---
 
 ## Overview
 
-`camera-to-robot` is a Python application that bridges computer vision and robot motion:
+`depth-cam-to-robot` bridges a depth camera and robot motion:
 
-1. A webcam looks down at a flat surface (paper, whiteboard, sand…)
-2. OpenCV's Canny edge detector extracts the outlines of whatever is in frame
-3. The edges are turned into an ordered list of robot poses
-4. A Universal Robots arm traces the path with a pen, using smooth `servoL` streaming at 125 Hz
+1. A RealSense D435i looks down at the sand and streams metric depth.
+2. The depth is detrended (the smooth bare-sand surface is estimated and subtracted)
+   so each groove shows up as local relief — "a few mm deeper than its surroundings."
+3. The thresholded grooves are thinned to 1-pixel centrelines and turned into an
+   ordered list of robot poses.
+4. A Universal Robots arm traces the path with smooth `servoL` streaming at 125 Hz.
 
-All interaction happens in a browser-based UI that opens automatically. No ROS, no offline programming.
+All interaction happens in a browser-based UI that opens automatically. No ROS, no
+offline programming.
 
 ---
 
 ## How it works
 
 ```
-Camera frame
+RealSense depth frame (metres)
     │
     ▼
-Gaussian blur  ──►  Canny edge detection  ──►  Binary edge image (1-px wide edges)
+temporal averaging (N frames on Capture)   ← cuts per-pixel depth noise ~√N
     │
     ▼
-_chains_from_edges()          ← 8-connected pixel chain follower
-    │                           visits each pixel once; no double-tracing
+gap-fill ─► denoise (Gaussian) ─► subtract smooth surface ─► local relief (mm)
+    │
+    ▼
+threshold "a few mm deeper"   ─► morphological close ─► drop small blobs
+    │
+    ▼
+skeletonize                   ← 1-px-wide groove centrelines
+    │
+    ▼
+_chains_from_edges()          ← 8-connected pixel chain follower (visit once)
+    │
     ▼
 smooth_stroke()               ← Chaikin corner-cutting (2 iterations)
     │
     ▼
-resample_stroke()             ← Uniform arc-length resampling (~10 px spacing)
+resample_stroke()             ← uniform arc-length resampling (~10 px spacing)
     │
     ▼
 _order_strokes()              ← TSP nearest-neighbour; minimises pen-up travel
@@ -53,63 +71,66 @@ PathExecutor._run()
 
 ---
 
-## Canny edge detection
+## Groove detection from depth
 
-### What it is
+### Why "valley detection", not a fixed depth band
 
-The **Canny edge detector** (John Canny, 1986) is a multi-stage algorithm that finds object boundaries in a greyscale image and outputs a 1-pixel-wide binary edge map. It is widely considered the gold standard for edge detection because it finds real edges while suppressing noise.
+A perfectly level sandbox would let you threshold an absolute depth band, but real
+surfaces sag and tilt, so a fixed depth picks up the *slope* of the sand, not the
+marks. Instead we estimate the smooth bare-sand surface (a heavily blurred copy of
+the depth map) and subtract it, leaving only the **local relief**. A groove is then
+simply "a few mm deeper than its immediate surroundings" anywhere on the surface —
+regardless of how the sandbox tilts. (An absolute iso-depth band is still available
+via the **Band** mode.)
 
-### The four stages
+### The stages (`depth_extractor.grooves_from_depth`)
 
-**1. Gaussian blur** (`CANNY_BLUR_KERNEL = 5`, a 5×5 kernel)
+**1. Gap fill** — invalid depth pixels (0 / NaN) are filled from the nearest valid
+neighbour so blurring doesn't bleed holes into the surface estimate.
 
-Smooths the image before gradient computation. Camera noise — random pixel variations — would otherwise produce false edges. A larger kernel removes more noise but blurs sharp corners; a smaller kernel preserves fine detail but picks up more noise.
+**2. Denoise** (`smooth_sigma_px`) — a small Gaussian smooths per-pixel depth noise.
 
-**2. Gradient computation** (Sobel operator)
+**3. Detrend** (`detrend_sigma_px`) — the bare-sand surface is estimated as the
+low-frequency component (a large-radius Gaussian) and subtracted, giving relief in
+millimetres. Positive relief = farther from the top-down camera = a depression.
 
-Applies a 3×3 Sobel filter in both X and Y directions to estimate how rapidly pixel intensity changes at each location. The result is a *gradient magnitude* (how strong the edge is) and a *gradient direction* (which way the edge runs).
+**4. Threshold** (`groove_depth_mm`, `detect` mode):
+| Mode | Keeps |
+|------|-------|
+| `valley` (default) | relief deeper than `groove_depth_mm` — the grooves |
+| `ridge` | relief raised more than `groove_depth_mm` — bumps/ridges |
+| `band` | relief within `band_center_mm ± band_width_mm` — an absolute iso-depth slice |
 
-**3. Non-maximum suppression**
+**5. Clean** — a morphological close bridges 1-px gaps, then connected components
+smaller than `min_blob_px` are discarded as noise.
 
-Looks along the gradient direction at each pixel and keeps only the local maximum — i.e. the single pixel where the gradient is strongest across the edge width. Every other pixel on the same edge is set to zero.
+**6. Skeletonize** — the thick mask is thinned to 1-pixel-wide centrelines (the same
+"each pixel once" property the chain extractor relies on). Uses scikit-image if
+installed, else opencv-contrib `ximgproc.thinning`, else a pure-numpy Zhang-Suen
+fallback.
 
-This is why Canny edges are always **exactly 1 pixel wide** — a property our pixel-chain extractor relies on.
+### From centrelines to robot strokes
 
-**4. Hysteresis thresholding** (two-pass)
+The skeleton is a binary mask of white pixels on black. `_chains_from_edges()` walks
+each centreline via 8-connectivity, starting from endpoints (pixels with ≤1
+neighbour) and removing each visited pixel, so every pixel is visited exactly once
+and each chain is an ordered tip-to-tip path. (`cv2.findContours` would trace each
+thin line down one side and back the other, drawing it twice.)
 
-Two thresholds control which gradient peaks become edges:
-
-| Threshold | Parameter | Default | Meaning |
-|-----------|-----------|---------|---------|
-| High | `CANNY_THRESHOLD_HIGH` | `150` | Above this → strong edge (always kept) |
-| Low | `CANNY_THRESHOLD_LOW` | `50` | Between low and high → weak edge (kept only if connected to a strong edge) |
-
-The two-pass approach connects broken edges (which would otherwise stop a robot stroke mid-path) while discarding isolated noise specks that happen to exceed the low threshold.
-
-### From Canny output to robot strokes
-
-The edge image is a binary mask of white pixels on black. We need to turn those scattered pixels into ordered lists (strokes) the robot can trace.
-
-**Why not `cv2.findContours`?**
-`findContours` traces the *boundary* of white regions. For a 1-pixel-wide edge, the boundary goes along one side of the pixel and comes back along the other — visiting every pixel twice. The robot would draw each stroke, then retrace it in the opposite direction.
-
-**What we do instead — `_chains_from_edges()`:**
-1. Collect all white pixels into a set
-2. Pre-compute each pixel's neighbour count; pixels with ≤1 neighbour are *endpoints* (chain tips)
-3. Start each new chain from an endpoint (ensuring we begin at a tip, not the middle of a stroke)
-4. Walk the chain pixel-by-pixel via 8-connectivity, removing each visited pixel from the set
-5. Stop when no unvisited neighbours remain
-
-Result: each pixel is visited exactly once and each chain is an ordered path from one tip to the other.
-
-### Tuning the edge detector
+### Tuning
 
 | Goal | What to change |
 |------|----------------|
-| Fewer edges (less noise) | Increase `CANNY_THRESHOLD_HIGH` |
-| Connect broken edges | Decrease `CANNY_THRESHOLD_LOW` |
-| Reduce noise (at the cost of fine detail) | Increase `CANNY_BLUR_KERNEL` (must stay odd: 3, 5, 7…) |
-| Discard tiny noise fragments | Increase `CONTOUR_MIN_PIXELS` |
+| Catch fainter grooves | Lower `groove_depth_mm` |
+| Reject noise / grain | Raise `groove_depth_mm`, or raise `smooth_sigma_px` (Denoise) |
+| Flatten broad undulations | Lower `detrend_sigma_px` (Surface scale) |
+| Keep thin marks | Lower `smooth_sigma_px` |
+| Discard speckle | Raise `min_blob_px` |
+| Trace raised lines instead | Switch **Mode** to `ridge` |
+
+The single biggest quality win is **temporal averaging**: the sand is static, so
+Capture averages `DEPTH_AVERAGE_FRAMES` frames, cutting per-pixel depth noise by
+~√N before any detection runs.
 
 ---
 
@@ -119,20 +140,22 @@ Result: each pixel is visited exactly once and each chain is an ordered path fro
 |-----------|-------------|
 | Robot | Universal Robots UR3 / UR5 / UR10 / UR16 (any with RTDE support) |
 | Robot mode | **Remote Control** enabled on Teach Pendant (Settings → System → Remote Control) |
-| Camera | Any USB webcam or built-in laptop camera |
-| Camera position | Top-down view covering the full drawing surface |
-| Host OS | macOS or Linux (Windows not tested) |
+| Camera | Intel RealSense D435i (any RealSense depth camera should work) |
+| Camera position | Top-down view covering the full sandbox |
 | Python | 3.11+ |
+
+A short-range RealSense (e.g. D405) resolves sub-mm grooves even better, but the
+D435i is the reference setup here.
 
 ---
 
 ## Installation
 
 ```bash
-git clone https://github.com/f-scotto/camera-to-robot.git
-cd camera-to-robot
+git clone <your-repo-url>
+cd depth_cam-to-robot
 python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+.venv\Scripts\activate           # Windows  (macOS/Linux: source .venv/bin/activate)
 pip install -r requirements.txt
 ```
 
@@ -140,10 +163,12 @@ pip install -r requirements.txt
 
 | Package | Purpose |
 |---------|---------|
-| `opencv-python >= 4.8` | Camera capture, Gaussian blur, Canny, JPEG encoding |
+| `pyrealsense2 >= 2.54` | RealSense depth capture |
+| `opencv-python >= 4.8` | Depth filtering, colorizing, JPEG encoding |
+| `scikit-image >= 0.22` | Fast skeletonization (a pure-numpy fallback runs without it) |
 | `ur-rtde >= 1.6` | UR robot RTDE control (moveL, servoL, freedrive, TCP pose) |
 | `aiohttp >= 3.9` | Async web server, MJPEG streaming, WebSocket |
-| `numpy >= 1.26` | Array operations in workspace geometry |
+| `numpy >= 1.26` | Array operations |
 
 ---
 
@@ -153,7 +178,9 @@ pip install -r requirements.txt
 python main.py
 ```
 
-The browser opens automatically at `http://localhost:8080`. Closing the browser tab stops the server.
+The browser opens automatically at **`http://localhost:5005`**. (Port 5005 is
+deliberately off the common 8080/8000 range so this app can run alongside other
+tools without a port clash.) Closing the browser tab stops the server.
 
 ---
 
@@ -161,64 +188,84 @@ The browser opens automatically at `http://localhost:8080`. Closing the browser 
 
 ### First time
 
-1. **Connect** — enter the robot's IP address (e.g. `192.168.1.100`) and click **Connect**. The status dot turns green.
+1. **Connect** — enter the robot's IP (e.g. `192.168.1.100`) and click **Connect**.
 
 2. **Workspace setup** — a setup overlay appears.
-   - Click **Start Freedrive** — the robot arm goes compliant (you can move it by hand).
-   - Physically position the robot's TCP (tool tip) at three reference points on the drawing surface and click **Record** for each:
-     - **P0** — the workspace origin (e.g. bottom-left corner of the paper)
+   - Click **Activate Freedrive** — the arm goes compliant.
+   - Move the TCP to three reference points on the sandbox and **Record** each:
+     - **P0** — workspace origin (e.g. bottom-left corner)
      - **Px** — a point along the X direction (e.g. bottom-right corner)
      - **Py** — a point along the Y direction (e.g. top-left corner)
-   - Click **Confirm Workspace** — the geometry is saved to `workspace.json` for all future sessions.
+   - Click **Confirm & Start** — saved to `workspace.json` for future sessions.
 
-3. **Point the camera** at your subject so it covers the whole work surface.
+3. **Aim the RealSense** straight down so it covers the whole sandbox. The left panel
+   shows the colorized depth (near = blue → far = red); the right panel shows a live
+   groove preview.
 
-4. **Capture Image** — click **Capture Image** to freeze the current frame. The live feeds are replaced by the captured still (left) and a processed preview (right).
+4. **Capture Image** — freezes a temporally averaged depth frame and switches to the
+   editing view.
 
-5. **Crop & adjust** — in the **Adjust Image** panel:
-   - **✨ Auto Touch-Up** — one click to reveal faint relief like grooves raked into sand. It robustly stretches contrast (1st–99th percentile), denoises grain with an edge-preserving bilateral filter, applies CLAHE local equalization, and sharpens the ridges, then auto-picks the Canny thresholds from the image. Use **Auto strength** to scale how aggressive it is, then fine-tune with the manual sliders on top. Raise **Blur** if grain still produces speckle edges.
-   - Drag on the still to draw a **crop** rectangle (drag inside to move, corners to resize; **Reset Crop** restores the full frame). The crop selects which part of the workspace gets drawn — strokes stay positioned correctly within the calibrated area.
-   - Tune **Exposure / Brightness / Contrast / Highlights / Shadows / Gamma**, toggle **Local contrast (CLAHE)** for faint texture, or **Invert** for light marks on a dark ground.
-   - Tune **Blur** and **Canny low/high** to control edge sensitivity.
-   - The right panel updates live — switch between **Edges** (what becomes the path) and **Adjusted** (the tuned image). Aim for clean white edges on the marking with little background noise.
+5. **Detect Grooves** — in the panel:
+   - Drag on the depth still to draw a **crop** rectangle (drag inside to move,
+     corners to resize; **Reset Crop** restores the full frame). The crop selects
+     which part of the workspace gets drawn — strokes stay correctly positioned.
+   - Pick a **Mode** (Valley / Ridge / Band) and tune **Groove depth**, **Surface
+     scale**, **Denoise**, and **Min blob** until the grooves show as clean white
+     centrelines with little background noise.
+   - The right panel toggles between **Grooves** (what becomes the path) and **Depth**
+     (the colorized depth). Depth-view range sliders are display-only.
 
-6. **Generate Path** — click **Generate Path**. The 3D viewer shows the extracted path (green = pen-down strokes, grey = pen-up travel). Re-adjust and regenerate as many times as you like, or **Retake** to grab a fresh frame.
+6. **Generate Path** — the 3D viewer shows the extracted path (green = pen-down,
+   grey = pen-up travel). Re-tune and regenerate freely, or **Retake** for a fresh
+   capture.
 
-7. **Run** — click **Run**. The robot lifts, travels to the first stroke, and draws. A progress bar tracks execution. Click **Cancel** at any time to stop mid-stroke.
+7. **Run** — the robot lifts, travels to the first stroke, and draws. A progress bar
+   tracks execution; **Cancel** stops mid-stroke.
 
 ### Subsequent sessions
 
-After the first workspace calibration, a **"Use This Workspace"** banner appears on connect. Click it to skip recalibration and start immediately.
+After the first calibration, a **"Use This Workspace"** banner appears on connect.
+Click it to skip recalibration.
+
+### Test mode (no robot)
+
+Click **Test Mode (no robot)** to set a synthetic workspace and exercise the
+depth → groove → path-preview pipeline without connecting a robot. Run stays gated
+on a real connection.
 
 ---
 
 ## Configuration reference
 
-All parameters live in `config.py`. Edit that file to tune the system for your setup.
+All parameters live in `config.py`.
 
 ### Server
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HTTP_HOST` | `"localhost"` | Bind address |
-| `HTTP_PORT` | `8080` | Web UI port |
+| `HTTP_PORT` | `5005` | Web UI port |
 
-### Camera
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CAMERA_INDEX` | `0` | Device index (`0` = built-in / first camera) |
-| `CAMERA_WIDTH` | `640` | Capture resolution width (px) |
-| `CAMERA_HEIGHT` | `480` | Capture resolution height (px) |
-
-### Canny edge detection
+### Depth camera (RealSense)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CANNY_BLUR_KERNEL` | `5` | Gaussian blur kernel size (must be odd) |
-| `CANNY_THRESHOLD_LOW` | `50` | Lower hysteresis threshold |
-| `CANNY_THRESHOLD_HIGH` | `150` | Upper hysteresis threshold |
-| `CONTOUR_MIN_PIXELS` | `20` | Discard chains shorter than this many pixels |
+| `DEPTH_WIDTH` | `640` | Depth stream width (px) |
+| `DEPTH_HEIGHT` | `480` | Depth stream height (px) |
+| `DEPTH_FPS` | `30` | Depth stream frame rate |
+| `DEPTH_AVERAGE_FRAMES` | `30` | Frames temporally averaged on Capture |
+| `DEPTH_COLOR_NEAR_M` / `DEPTH_COLOR_FAR_M` | `0.0` | Colormap range in metres (0 = auto) |
+
+### Groove detection
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GROOVE_DETECT` | `"valley"` | `valley` / `ridge` / `band` |
+| `GROOVE_DEPTH_MM` | `1.5` | mm deeper than surface to count as a groove |
+| `GROOVE_DETREND_SIGMA_PX` | `25.0` | blur radius estimating the bare surface |
+| `GROOVE_SMOOTH_SIGMA_PX` | `1.5` | depth denoise before detection |
+| `GROOVE_MIN_BLOB_PX` | `40` | discard detected specks smaller than this |
+| `CONTOUR_MIN_PIXELS` | `20` | discard chains shorter than this many pixels |
 
 ### Path extraction
 
@@ -232,7 +279,7 @@ All parameters live in `config.py`. Edit that file to tune the system for your s
 |----------|---------|-------|-------------|
 | `DRAW_Z` | `-0.010` | m | Pen-contact Z offset below workspace surface origin |
 | `TRAVEL_Z` | `0.050` | m | Pen-up travel height above workspace surface origin |
-| `DRAW_SPEED` | `0.05` | m/s | Average drawing speed (with smoothstep, peak is 1.5×) |
+| `DRAW_SPEED` | `0.05` | m/s | Average drawing speed (smoothstep peak is 1.5×) |
 | `DRAW_ACCEL` | `0.3` | m/s² | Drawing acceleration |
 | `TRAVEL_SPEED` | `0.15` | m/s | Pen-up travel speed |
 | `TRAVEL_ACCEL` | `0.5` | m/s² | Pen-up travel acceleration |
@@ -261,20 +308,20 @@ All parameters live in `config.py`. Edit that file to tune the system for your s
 ## Project structure
 
 ```
-camera-to-robot/
+depth_cam-to-robot/
 ├── main.py                  # Entry point: shared state, callbacks, startup
 ├── config.py                # All configurable parameters
 ├── server.py                # aiohttp server: MJPEG feeds, WebSocket, static files
-├── camera_thread.py         # Background camera capture → dual MJPEG streams
-├── path_extractor.py        # Canny → pixel chains → smooth → resample → TSP → robot coords
+├── camera_thread.py         # DepthCameraThread: RealSense → colorized-depth + groove streams
+├── depth_extractor.py       # Depth → groove engine: colorize, detect, crop, skeletonize
+├── path_extractor.py        # Grooves → pixel chains → smooth → resample → TSP → robot coords
 ├── path_executor.py         # Background thread: lift/travel/servoL per stroke, progress
 ├── robot_controller.py      # Thread-safe ur-rtde wrapper (moveL, servoL, freedrive, EE pose)
 ├── workspace.py             # 3-point workspace calibration; pixel ↔ robot coord mapping
 ├── settings.py              # Persistent JSON settings (last robot IP)
 ├── conftest.py              # Pytest shared fixtures
 ├── pytest.ini               # Test configuration
-├── requirements.txt         # Production dependencies
-├── requirements-dev.txt     # Development dependencies (pytest, coverage)
+├── requirements.txt         # Dependencies
 ├── workspace.json           # Auto-generated: saved workspace calibration
 ├── settings.json            # Auto-generated: saved app settings
 └── viewer/
@@ -294,57 +341,60 @@ camera-to-robot/
 
 Two background daemon threads run alongside the async event loop:
 
-- **`CameraThread`** — continuously reads frames from `cv2.VideoCapture`, encodes two JPEG streams (raw + Canny), and writes them to `shared_state` under `_state_lock`. The MJPEG HTTP endpoints read from `shared_state` at ~30 fps.
-- **`PathExecutor`** — runs the per-stroke lift/travel/draw sequence. Long-running RTDE calls (`moveL`, `servoL`) happen here so the WebSocket broadcast loop is never blocked.
+- **`DepthCameraThread`** — continuously reads depth frames from the RealSense,
+  colorizes them and computes a (throttled) live groove preview, encodes both as
+  JPEG into `shared_state`, and buffers the recent raw metric depth so Capture can
+  return a temporally averaged frame. The MJPEG endpoints read at ~30 fps.
+- **`PathExecutor`** — runs the per-stroke lift/travel/draw sequence. Long-running
+  RTDE calls (`moveL`, `servoL`) happen here so the WebSocket broadcast loop is
+  never blocked.
 
-All cross-thread communication goes through a single `shared_state: dict` protected by `state_lock: threading.Lock`. The aiohttp event loop offloads blocking calls via `loop.run_in_executor(None, fn)`.
+All cross-thread communication goes through a single `shared_state: dict` protected
+by `state_lock: threading.Lock`. The aiohttp event loop offloads blocking work via
+`loop.run_in_executor(None, fn)`.
 
 ### Workspace calibration
 
-Three robot TCP positions define the drawing surface:
-
-- **P0** — origin
-- **Px** — a point along the camera's horizontal axis
-- **Py** — a point along the camera's vertical axis
-
-`WorkspaceConfig.from_points()` computes an orthonormal coordinate frame (origin, x-axis, y-axis, z-axis) and the extents in metres. Pixel coordinates are then mapped linearly: `world_x = (u / frame_width) × x_extent`, and the result is expressed in robot base-frame by `p = origin + wx·x̂ + wy·ŷ`.
+Three robot TCP positions define the drawing surface (P0 origin, Px along X, Py along
+Y). `WorkspaceConfig.from_points()` builds an orthonormal frame and extents in metres;
+pixel coordinates map linearly: `world_x = (u / frame_width) × x_extent`, expressed in
+the robot base frame by `p = origin + wx·x̂ + wy·ŷ`.
 
 ### Smooth robot motion
 
-Drawing strokes use `servoL` (UR RTDE servo mode) rather than `moveL`:
+Drawing strokes use `servoL` rather than `moveL`:
 
-- Commands stream at **125 Hz** (8 ms timesteps)
-- Position is advanced using **arc-length parameterisation** — the robot moves at `DRAW_SPEED` metres per second regardless of waypoint density
-- **Smoothstep ease-in/out** (`f(α) = 3α² − 2α³`) is applied to the parameterisation: velocity is 0 at stroke start and end, peaking at 1.5× `DRAW_SPEED` at the midpoint. This eliminates abrupt jerks at pen-down and pen-up transitions.
+- Commands stream at **125 Hz** (8 ms timesteps).
+- Position advances using **arc-length parameterisation** — constant `DRAW_SPEED`
+  regardless of waypoint density.
+- **Smoothstep ease-in/out** (`f(α) = 3α² − 2α³`) zeroes velocity at stroke start/end
+  (peaking at 1.5× `DRAW_SPEED` mid-stroke), eliminating jerk at pen-down/up.
 
 ---
 
 ## Development & testing
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -r requirements.txt
 
 # Unit tests (no hardware required)
-pytest -q --ignore=tests/test_integration.py
+pytest -q -m "not integration"
 
-# With coverage
-pytest --cov=. --ignore=tests/test_integration.py
-
-# Integration tests (requires webcam and robot)
-export TEST_ROBOT_IP=192.168.1.100
+# Integration tests (require a RealSense and/or UR robot)
+set TEST_ROBOT_IP=192.168.1.100      # Windows  (macOS/Linux: export ...)
 pytest -m integration -v
 ```
 
-The test suite has **89 unit tests** across four modules:
-
 | Test file | What it covers |
 |-----------|---------------|
-| `test_path_extractor.py` | Canny pipeline, chain extraction, resampling, TSP ordering, coordinate mapping |
-| `test_path_executor.py` | Stroke sequencing, servoL streaming, ease-in/out, progress tracking, cancel |
+| `test_depth_extractor.py` | Depth → groove detection, colorize, crop/process, param parsing, thread no-hardware paths |
+| `test_path_extractor.py` | Chain extraction, resampling, TSP ordering, coordinate mapping |
+| `test_path_executor.py` | Stroke sequencing, servoL streaming, ease-in/out, progress, cancel |
 | `test_robot_controller.py` | RTDE port probe, connect/disconnect, motion commands, thread safety, freedrive |
-| `test_camera_thread.py` | Frame capture, dual MJPEG encoding, lock separation |
+| `test_integration.py` | Live RealSense feed, full depth→groove→robot pipeline (hardware-gated) |
 
-All unit tests mock hardware (robot and camera) — no physical devices needed.
+All unit tests mock hardware (robot) or use synthetic depth — no physical devices
+needed.
 
 ---
 
@@ -352,4 +402,4 @@ All unit tests mock hardware (robot and camera) — no physical devices needed.
 
 - Robot communication based on [UR-hand-control](https://github.com/f-scotto/UR-hand-control)
 - UR RTDE interface: [ur-rtde documentation](https://sdurobotics.gitlab.io/ur_rtde/)
-- Canny edge detection: J. Canny, "A computational approach to edge detection," *IEEE TPAMI*, 1986
+- Intel RealSense SDK (`pyrealsense2`): [librealsense](https://github.com/IntelRealSense/librealsense)

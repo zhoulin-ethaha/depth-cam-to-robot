@@ -2,3 +2,5 @@ opencv-python>=4.8.0
 ur-rtde>=1.6.0
 aiohttp>=3.9.0
 numpy>=1.26.0
+pyrealsense2>=2.54.0
+scikit-image>=0.22.0

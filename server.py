@@ -9,7 +9,7 @@ from aiohttp import web
 
 from config import (
     HTTP_HOST, HTTP_PORT, VIS_INTERVAL,
-    CAMERA_RAW_PATH, CAMERA_PROCESSED_PATH, WS_PATH, STATIC_PATH,
+    DEPTH_PATH, GROOVE_PATH, WS_PATH, STATIC_PATH,
 )
 from settings import load_settings
 
@@ -47,7 +47,6 @@ class Server:
         on_retake: Optional[Callable] = None,
         on_run: Optional[Callable] = None,
         on_cancel: Optional[Callable] = None,
-        on_select_camera: Optional[Callable] = None,
     ):
         self._state = shared_state
         self._lock = state_lock
@@ -68,16 +67,14 @@ class Server:
         self._on_retake = on_retake
         self._on_run = on_run
         self._on_cancel = on_cancel
-        self._on_select_camera = on_select_camera
         self._ws_clients: set[web.WebSocketResponse] = set()
         self._app = self._build_app()
 
     def _build_app(self) -> web.Application:
         app = web.Application(middlewares=[_no_cache_static])
         app.router.add_get("/", self._handle_index)
-        app.router.add_get("/cameras", self._handle_cameras)
-        app.router.add_get(CAMERA_RAW_PATH, self._handle_camera_raw)
-        app.router.add_get(CAMERA_PROCESSED_PATH, self._handle_camera_processed)
+        app.router.add_get(DEPTH_PATH, self._handle_depth)
+        app.router.add_get(GROOVE_PATH, self._handle_grooves)
         app.router.add_get(WS_PATH, self._handle_ws)
         app.router.add_static(STATIC_PATH, _VIEWER_DIR, show_index=False)
         return app
@@ -92,11 +89,6 @@ class Server:
 
     async def _handle_index(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(_VIEWER_DIR / "index.html")
-
-    async def _handle_cameras(self, request: web.Request) -> web.Response:
-        with self._lock:
-            cameras = self._state.get("available_cameras", [])
-        return web.json_response(cameras)
 
     async def _mjpeg_stream(self, request: web.Request, key: str) -> web.StreamResponse:
         response = web.StreamResponse()
@@ -119,11 +111,11 @@ class Server:
             pass
         return response
 
-    async def _handle_camera_raw(self, request: web.Request) -> web.StreamResponse:
-        return await self._mjpeg_stream(request, "last_frame_raw_jpg")
+    async def _handle_depth(self, request: web.Request) -> web.StreamResponse:
+        return await self._mjpeg_stream(request, "last_depth_color_jpg")
 
-    async def _handle_camera_processed(self, request: web.Request) -> web.StreamResponse:
-        return await self._mjpeg_stream(request, "last_frame_canny_jpg")
+    async def _handle_grooves(self, request: web.Request) -> web.StreamResponse:
+        return await self._mjpeg_stream(request, "last_groove_jpg")
 
     async def _handle_ws(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse()
@@ -225,11 +217,6 @@ class Server:
             if self._on_cancel:
                 asyncio.create_task(self._on_cancel(ws))
 
-        elif msg_type == "select_camera":
-            index = data.get("index")
-            if self._on_select_camera and index is not None:
-                asyncio.create_task(self._on_select_camera(int(index)))
-
     async def _broadcast_loop(self) -> None:
         while True:
             await asyncio.sleep(VIS_INTERVAL)
@@ -309,14 +296,14 @@ class Server:
         except Exception:
             pass
 
-    async def send_preview(self, ws, adjusted_jpg: Optional[bytes],
-                           edges_jpg: Optional[bytes]) -> None:
-        """Send the live edit preview: adjusted grayscale + Canny edges (data URLs)."""
+    async def send_preview(self, ws, depth_jpg: Optional[bytes],
+                           grooves_jpg: Optional[bytes]) -> None:
+        """Send the live edit preview: colorized depth + detected grooves (data URLs)."""
         try:
             await ws.send_str(json.dumps({
                 "type": "preview",
-                "adjusted": self._data_url(adjusted_jpg),
-                "edges": self._data_url(edges_jpg),
+                "depth": self._data_url(depth_jpg),
+                "grooves": self._data_url(grooves_jpg),
             }))
         except Exception:
             pass

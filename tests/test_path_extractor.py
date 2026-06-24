@@ -10,7 +10,7 @@ import pytest
 from path_extractor import (
     ExtractedPath,
     _order_strokes,
-    extract_from_frame,
+    extract_from_edges,
     pixels_to_robot_coords,
     resample_stroke,
 )
@@ -110,39 +110,39 @@ class TestOrderStrokes:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# extract_from_frame
+# extract_from_edges (groove mask → strokes)
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestExtractFromFrame:
+class TestExtractFromEdges:
 
-    def test_blank_frame_returns_empty(self, blank_frame):
-        result = extract_from_frame(blank_frame)
+    def test_blank_mask_returns_empty(self, mask_blank):
+        result = extract_from_edges(mask_blank)
         assert isinstance(result, ExtractedPath)
         assert result.total_strokes == 0
         assert result.strokes == []
         assert result.total_points == 0
 
-    def test_rectangle_returns_nonzero_strokes(self, frame_with_rectangle):
-        result = extract_from_frame(frame_with_rectangle)
+    def test_rectangle_returns_nonzero_strokes(self, mask_rectangle):
+        result = extract_from_edges(mask_rectangle)
         assert result.total_strokes >= 1
         assert result.total_points > 0
 
-    def test_min_contour_filter_rejects_tiny_dot(self, frame_with_tiny_dot):
-        result = extract_from_frame(frame_with_tiny_dot, min_contour_pixels=20)
+    def test_min_contour_filter_rejects_tiny_dot(self, mask_tiny_dot):
+        result = extract_from_edges(mask_tiny_dot, min_contour_pixels=20)
         assert result.total_strokes == 0
 
-    def test_min_contour_filter_passes_with_lower_threshold(self, frame_with_tiny_dot):
-        result = extract_from_frame(frame_with_tiny_dot, min_contour_pixels=3)
+    def test_min_contour_filter_passes_with_lower_threshold(self, mask_long_line):
+        result = extract_from_edges(mask_long_line, min_contour_pixels=3)
         assert result.total_strokes >= 1
 
-    def test_hardcodes_10px_spacing(self, frame_long_line):
+    def test_hardcodes_10px_spacing(self, mask_long_line):
         """
         BUG DOCUMENTATION: RESAMPLE_SPACING_MM is defined in config but unused.
-        extract_from_frame hardcodes spacing_px = 10.0 on line 56.
+        extract_from_edges hardcodes spacing_px = 10.0.
         This test confirms the actual 10px behavior and flags the inconsistency.
         When the bug is fixed to use RESAMPLE_SPACING_MM, update this assertion.
         """
-        result = extract_from_frame(frame_long_line)
+        result = extract_from_edges(mask_long_line)
         assert result.total_strokes >= 1
         for stroke in result.strokes:
             for i in range(1, len(stroke)):
@@ -152,19 +152,25 @@ class TestExtractFromFrame:
                 # spacing is ~10px (hardcoded), not RESAMPLE_SPACING_MM=5mm
                 assert dist <= 15, f"point spacing {dist:.1f}px unexpectedly large"
 
-    def test_single_pixel_edge_does_not_crash(self, blank_frame):
-        """A frame with a single bright pixel must not crash the chain extractor."""
-        single_pixel = blank_frame.copy()
-        single_pixel[60, 50] = [255, 255, 255]
-        result = extract_from_frame(single_pixel, min_contour_pixels=1)
+    def test_single_pixel_does_not_crash(self, mask_blank):
+        """A mask with a single bright pixel must not crash the chain extractor."""
+        single_pixel = mask_blank.copy()
+        single_pixel[60, 50] = 255
+        result = extract_from_edges(single_pixel, min_contour_pixels=1)
         assert isinstance(result, ExtractedPath)
 
-    def test_two_rectangles_return_multiple_strokes(self, frame_with_two_rectangles):
-        result = extract_from_frame(frame_with_two_rectangles)
+    def test_two_lines_return_multiple_strokes(self, mask_two_lines):
+        result = extract_from_edges(mask_two_lines)
         assert result.total_strokes >= 2
 
-    def test_strokes_contain_valid_pixel_coords(self, frame_with_rectangle):
-        result = extract_from_frame(frame_with_rectangle)
+    def test_offset_shifts_into_full_frame(self, mask_long_line):
+        result = extract_from_edges(mask_long_line, offset=(100, 50))
+        assert result.total_strokes >= 1
+        # Every point should be shifted by the crop origin.
+        assert all(pt[0] >= 100 and pt[1] >= 50 for s in result.strokes for pt in s)
+
+    def test_strokes_contain_valid_pixel_coords(self, mask_rectangle):
+        result = extract_from_edges(mask_rectangle)
         for stroke in result.strokes:
             for pt in stroke:
                 assert len(pt) == 2

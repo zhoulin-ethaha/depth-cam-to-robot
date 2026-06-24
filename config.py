@@ -2,12 +2,15 @@ import math
 from pathlib import Path
 
 # ── Server ────────────────────────────────────────────────────────────────────
-HTTP_HOST             = "localhost"
-HTTP_PORT             = 8080
-CAMERA_RAW_PATH       = "/camera"
-CAMERA_PROCESSED_PATH = "/camera/processed"
-WS_PATH               = "/ws"
-STATIC_PATH           = "/static"
+# Port 5005 is deliberately off the common 8080/8000 range so this depth app can
+# run alongside other tools (TouchDesigner, earlier RGB prototypes, etc.) without
+# a port clash.
+HTTP_HOST    = "localhost"
+HTTP_PORT    = 5005
+DEPTH_PATH   = "/depth"             # MJPEG: colorized depth (the live view)
+GROOVE_PATH  = "/depth/grooves"     # MJPEG: detected groove centrelines
+WS_PATH      = "/ws"
+STATIC_PATH  = "/static"
 
 # ── Persistent files ──────────────────────────────────────────────────────────
 WORKSPACE_FILE = Path("workspace.json")
@@ -25,15 +28,27 @@ SERVO_GAIN           = 300
 SERVO_VELOCITY_DEFAULT = 0.10
 SERVO_ACCELERATION   = 0.5
 
-# ── Camera ────────────────────────────────────────────────────────────────────
-CAMERA_INDEX  = 0      # 0 = built-in laptop webcam (always index 0 on macOS)
-CAMERA_WIDTH  = 640
-CAMERA_HEIGHT = 480
+# ── Depth camera (Intel RealSense D435i) ──────────────────────────────────────
+# The D435i streams metric depth directly, so grooves raked into sand — a few-mm
+# physical depression invisible to an RGB camera — are measured, not inferred
+# from shading. We keep the raw depth internally and only colorize it for display.
+DEPTH_WIDTH          = 640
+DEPTH_HEIGHT         = 480
+DEPTH_FPS            = 30
+DEPTH_AVERAGE_FRAMES = 30     # frames temporally averaged on Capture (cuts noise ~√n)
 
-# ── Canny edge detection ──────────────────────────────────────────────────────
-CANNY_BLUR_KERNEL    = 5    # Gaussian blur kernel size (must be odd)
-CANNY_THRESHOLD_LOW  = 50
-CANNY_THRESHOLD_HIGH = 150
+# Colormap range (metres) for the live depth view. 0 = auto (per-frame percentile).
+DEPTH_COLOR_NEAR_M = 0.0
+DEPTH_COLOR_FAR_M  = 0.0
+
+# ── Groove detection (depth → groove centrelines) ─────────────────────────────
+# See depth_extractor.grooves_from_depth for the algorithm. These are the live-feed
+# defaults and the initial values of the browser's Adjust controls.
+GROOVE_SMOOTH_SIGMA_PX  = 1.5    # denoise the depth map first
+GROOVE_DETREND_SIGMA_PX = 25.0   # blur radius estimating the bare-sand surface
+GROOVE_DEPTH_MM         = 1.5    # how much deeper than the surface counts as a groove
+GROOVE_MIN_BLOB_PX      = 40     # discard connected specks smaller than this
+GROOVE_DETECT           = "valley"  # "valley"=grooves, "ridge"=raised lines, "band"=iso-depth
 
 # ── Path extraction ───────────────────────────────────────────────────────────
 CONTOUR_MIN_PIXELS  = 20   # discard contours shorter than this many pixels

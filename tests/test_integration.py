@@ -29,59 +29,65 @@ def _robot_ip():
 @pytest.mark.integration
 def test_camera_live_feed(shared_state_and_lock):
     """
-    Prerequisite: webcam present at CAMERA_INDEX (see config.py).
+    Prerequisite: RealSense D435i connected.
     Asserts:
-    - Both JPEG streams are non-None bytes within 1 second.
-    - Raw JPEG decodes to an image matching configured dimensions.
+    - Both JPEG streams are non-None bytes within 2 seconds.
+    - The colorized-depth JPEG decodes to an image of the configured dimensions.
     """
     import time
     import cv2
     import numpy as np
-    from camera_thread import CameraThread
-    from config import CAMERA_WIDTH, CAMERA_HEIGHT
+    from camera_thread import DepthCameraThread
+    from config import DEPTH_WIDTH, DEPTH_HEIGHT
 
     state, lock = shared_state_and_lock
-    ct = CameraThread(state, lock)
+    ct = DepthCameraThread(state, lock)
     ct.start()
-    time.sleep(1.0)
+    time.sleep(2.0)
+    # Assert before stop() — stop() clears both JPEG keys to None.
+    depth_jpg  = state["last_depth_color_jpg"]
+    groove_jpg = state["last_groove_jpg"]
     ct.stop()
 
-    assert state["last_frame_raw_jpg"] is not None, "raw JPEG stream never populated"
-    assert state["last_frame_canny_jpg"] is not None, "Canny JPEG stream never populated"
+    assert depth_jpg is not None, "colorized-depth JPEG stream never populated"
+    assert groove_jpg is not None, "groove JPEG stream never populated"
 
-    raw = cv2.imdecode(np.frombuffer(state["last_frame_raw_jpg"], np.uint8), cv2.IMREAD_COLOR)
-    assert raw is not None
-    assert raw.shape[1] == CAMERA_WIDTH
-    assert raw.shape[0] == CAMERA_HEIGHT
+    color = cv2.imdecode(np.frombuffer(depth_jpg, np.uint8), cv2.IMREAD_COLOR)
+    assert color is not None
+    assert color.shape[1] == DEPTH_WIDTH
+    assert color.shape[0] == DEPTH_HEIGHT
 
 
 @pytest.mark.integration
-def test_extract_from_live_frame(shared_state_and_lock):
+def test_extract_from_live_depth(shared_state_and_lock):
     """
-    Prerequisite: webcam present, a drawing visible in the camera field.
+    Prerequisite: RealSense present, grooves raked into sand in the field of view.
     Asserts:
-    - extract_from_frame produces at least one stroke.
+    - grooves_from_depth + extract_from_edges produce at least one stroke.
     - All stroke points are within valid frame bounds.
     """
     import time
-    from camera_thread import CameraThread
-    from path_extractor import extract_from_frame
-    from config import CAMERA_WIDTH, CAMERA_HEIGHT
+    from camera_thread import DepthCameraThread
+    from depth_extractor import grooves_from_depth
+    from path_extractor import extract_from_edges
+    from config import DEPTH_WIDTH, DEPTH_HEIGHT
 
     state, lock = shared_state_and_lock
-    ct = CameraThread(state, lock)
+    ct = DepthCameraThread(state, lock)
     ct.start()
-    time.sleep(1.0)
-    frame = ct.capture_frame()
+    time.sleep(2.0)
+    captured = ct.capture_frame()
     ct.stop()
 
-    assert frame is not None, "No frame captured — is the camera connected?"
-    result = extract_from_frame(frame)
-    assert result.total_strokes > 0, "No strokes found — place a visible drawing in camera view"
+    assert captured is not None, "No depth captured — is the RealSense connected?"
+    depth_m, valid = captured
+    grooves = grooves_from_depth(depth_m, valid)
+    result = extract_from_edges(grooves)
+    assert result.total_strokes > 0, "No grooves found — rake some marks into the sand"
     for stroke in result.strokes:
         for pt in stroke:
-            assert 0 <= pt[0] <= CAMERA_WIDTH
-            assert 0 <= pt[1] <= CAMERA_HEIGHT
+            assert 0 <= pt[0] <= DEPTH_WIDTH
+            assert 0 <= pt[1] <= DEPTH_HEIGHT
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -152,34 +158,36 @@ def test_robot_move_to_safe_pose():
 # ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.integration
-def test_full_pipeline_blank_paper(shared_state_and_lock):
+def test_full_pipeline_flat_sand(shared_state_and_lock):
     """
-    Prerequisite: camera + robot connected. Blank paper in camera view.
+    Prerequisite: RealSense + robot connected. Flat, unmarked sand in view.
     Asserts:
-    - extract_from_frame returns 0 strokes on blank paper.
+    - grooves_from_depth returns 0 strokes on flat sand.
     - PathExecutor completes with phase="done" and only the final pen-up move fires.
     """
     import threading
     import time
-    from camera_thread import CameraThread
-    from path_extractor import extract_from_frame
+    from camera_thread import DepthCameraThread
+    from depth_extractor import grooves_from_depth
+    from path_extractor import extract_from_edges
     from path_executor import PathExecutor
     from robot_controller import RobotController
 
     state, lock = shared_state_and_lock
     ip = _robot_ip()
 
-    # Camera capture
-    ct = CameraThread(state, lock)
+    # Depth capture
+    ct = DepthCameraThread(state, lock)
     ct.start()
-    time.sleep(1.0)
-    frame = ct.capture_frame()
+    time.sleep(2.0)
+    captured = ct.capture_frame()
     ct.stop()
-    assert frame is not None
+    assert captured is not None
 
-    # Extraction — expects blank page
-    extracted = extract_from_frame(frame)
-    assert extracted.total_strokes == 0, "Expected blank paper — remove any drawing from view"
+    # Extraction — expects flat sand
+    depth_m, valid = captured
+    extracted = extract_from_edges(grooves_from_depth(depth_m, valid))
+    assert extracted.total_strokes == 0, "Expected flat sand — smooth out any grooves"
 
     # Execution — empty strokes
     rc = RobotController()
@@ -195,20 +203,21 @@ def test_full_pipeline_blank_paper(shared_state_and_lock):
 
 
 @pytest.mark.integration
-def test_full_pipeline_drawn_circle(shared_state_and_lock):
+def test_full_pipeline_raked_groove(shared_state_and_lock):
     """
-    Prerequisite: camera + robot. A drawn circle on paper in camera view.
+    Prerequisite: RealSense + robot. Grooves raked into the sand in view.
     Asserts:
     - At least one stroke extracted.
     - Robot executes all strokes, phase becomes "done", no robot fault.
     CAUTION: robot will move. Ensure workspace is clear before running.
     """
     import time
-    from camera_thread import CameraThread
-    from path_extractor import extract_from_frame, pixels_to_robot_coords
+    from camera_thread import DepthCameraThread
+    from depth_extractor import grooves_from_depth
+    from path_extractor import extract_from_edges, pixels_to_robot_coords
     from path_executor import PathExecutor
     from robot_controller import RobotController
-    from config import CAMERA_WIDTH, CAMERA_HEIGHT
+    from config import DEPTH_WIDTH, DEPTH_HEIGHT
 
     state, lock = shared_state_and_lock
     ip = _robot_ip()
@@ -216,22 +225,23 @@ def test_full_pipeline_drawn_circle(shared_state_and_lock):
     rc = RobotController()
     rc.connect(ip)
 
-    ct = CameraThread(state, lock)
+    ct = DepthCameraThread(state, lock)
     ct.start()
-    time.sleep(1.0)
-    frame = ct.capture_frame()
+    time.sleep(2.0)
+    captured = ct.capture_frame()
     ct.stop()
-    assert frame is not None
+    assert captured is not None
 
-    extracted = extract_from_frame(frame)
-    assert extracted.total_strokes > 0, "No drawing detected — place a circle in camera view"
+    depth_m, valid = captured
+    extracted = extract_from_edges(grooves_from_depth(depth_m, valid))
+    assert extracted.total_strokes > 0, "No grooves detected — rake some marks into the sand"
 
     with lock:
         workspace = state.get("workspace")
     assert workspace is not None, "Workspace must be set before running full pipeline"
 
     robot_strokes = pixels_to_robot_coords(
-        extracted.strokes, workspace, CAMERA_WIDTH, CAMERA_HEIGHT
+        extracted.strokes, workspace, DEPTH_WIDTH, DEPTH_HEIGHT
     )
 
     try:

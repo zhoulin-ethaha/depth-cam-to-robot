@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
-from config import CAMERA_HEIGHT, CAMERA_WIDTH
+from config import DEPTH_HEIGHT, DEPTH_WIDTH
 
 
 @dataclass
@@ -16,7 +16,7 @@ class WorkspaceConfig:
     y_axis:   list[float]  # unit vector (re-orthogonalized)
     z_axis:   list[float]  # x_axis × y_axis (normal to work surface, points away from surface)
     x_extent: float         # metres: distance P0 → Px
-    y_extent: float         # metres: x_extent × (CAMERA_HEIGHT / CAMERA_WIDTH) — isotropic scaling
+    y_extent: float         # metres: x_extent × (DEPTH_HEIGHT / DEPTH_WIDTH) — isotropic scaling
 
     @classmethod
     def from_points(
@@ -46,8 +46,8 @@ class WorkspaceConfig:
         y_len  = _norm(y_axis)
         y_axis = _scale(y_axis, 1.0 / y_len)
 
-        # y_extent derived from camera aspect ratio — ensures isotropic gesture scaling
-        y_extent = x_extent * (CAMERA_HEIGHT / CAMERA_WIDTH)
+        # y_extent derived from depth-frame aspect ratio — ensures isotropic scaling
+        y_extent = x_extent * (DEPTH_HEIGHT / DEPTH_WIDTH)
 
         return cls(
             origin=list(p0[:3]),

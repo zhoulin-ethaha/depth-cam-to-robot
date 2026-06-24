@@ -4,11 +4,9 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
-import cv2
 import numpy as np
 
 from config import (
-    CANNY_BLUR_KERNEL, CANNY_THRESHOLD_LOW, CANNY_THRESHOLD_HIGH,
     CONTOUR_MIN_PIXELS, RESAMPLE_SPACING_MM, TOOL_ORIENTATION,
 )
 
@@ -20,38 +18,19 @@ class ExtractedPath:
     total_points: int
 
 
-def extract_from_frame(
-    frame_bgr: np.ndarray,
-    min_contour_pixels: int = CONTOUR_MIN_PIXELS,
-) -> ExtractedPath:
-    """
-    Full pipeline: BGR frame → ordered list of pixel-coordinate strokes.
-
-    1. Greyscale → Gaussian blur → Canny
-    2. 8-connectivity chain following
-    3. Filter short chains
-    4. Resample to uniform spacing
-    5. TSP nearest-neighbour ordering
-    """
-    gray    = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (CANNY_BLUR_KERNEL, CANNY_BLUR_KERNEL), 0)
-    edges   = cv2.Canny(blurred, CANNY_THRESHOLD_LOW, CANNY_THRESHOLD_HIGH)
-    return extract_from_edges(edges, min_contour_pixels)
-
-
 def extract_from_edges(
     edges: np.ndarray,
     min_contour_pixels: int = CONTOUR_MIN_PIXELS,
     offset: tuple[int, int] = (0, 0),
 ) -> ExtractedPath:
     """
-    Turn a binary Canny edge image into ordered, resampled pixel strokes.
+    Turn a binary groove image (1-px-wide centrelines, white on black) into
+    ordered, resampled pixel strokes.
 
-    Shared by extract_from_frame and the captured-still pipeline so the live
-    edit preview and the final path come from identical processing. ``offset``
-    (x0, y0) shifts every point back into full-frame pixel coordinates when the
-    edges were computed on a cropped sub-image, so the workspace mapping in
-    pixels_to_robot_coords stays correct.
+    The live groove preview and the final captured path come from identical
+    processing. ``offset`` (x0, y0) shifts every point back into full-frame pixel
+    coordinates when the grooves were computed on a cropped sub-image, so the
+    workspace mapping in pixels_to_robot_coords stays correct.
     """
     strokes = _chains_from_edges(edges, min_contour_pixels)
 
@@ -124,7 +103,7 @@ def _chains_from_edges(
     min_len: int,
 ) -> list[list[tuple[int, int]]]:
     """
-    Extract ordered pixel chains from a binary Canny edge image via 8-connectivity
+    Extract ordered pixel chains from a binary groove image via 8-connectivity
     chain-following. Each edge pixel is visited once, giving the true centerline
     without the double-tracing artefact that cv2.findContours produces on thin edges.
     """

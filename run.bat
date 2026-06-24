@@ -1,5 +1,5 @@
 @echo off
-REM -- Camera to Robot launcher ---------------------------------------------
+REM -- Depth Camera to Robot launcher ---------------------------------------
 REM Double-click this file to start the program.
 
 REM Use UTF-8 so Unicode log output does not crash the program.
@@ -9,8 +9,8 @@ chcp 65001 >nul
 REM Move to the folder this script lives in, so it works from anywhere.
 cd /d "%~dp0"
 
-echo Starting Camera to Robot...
-echo (A browser tab will open at http://localhost:8080)
+echo Starting Depth Camera to Robot...
+echo (A browser tab will open at http://localhost:5005)
 echo.
 
 python main.py

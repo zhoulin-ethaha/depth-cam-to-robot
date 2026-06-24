@@ -13,45 +13,66 @@ import pytest
 from workspace import WorkspaceConfig
 
 
-# ── Synthetic image generators ────────────────────────────────────────────────
+# ── Synthetic groove masks (binary, white-on-black) ───────────────────────────
+# These stand in for the output of depth_extractor.grooves_from_depth — the
+# 1-px-wide groove centrelines that path_extractor.extract_from_edges consumes.
 
 @pytest.fixture
-def blank_frame():
-    """480×640 all-black BGR frame. No edges — Canny returns nothing."""
-    return np.zeros((480, 640, 3), dtype=np.uint8)
-
-
-@pytest.fixture
-def frame_with_rectangle():
-    """Black frame with a thick white-filled rectangle. Produces clean Canny edges."""
-    frame = np.zeros((480, 640, 3), dtype=np.uint8)
-    cv2.rectangle(frame, (100, 100), (300, 300), (255, 255, 255), -1)
-    return frame
+def mask_blank():
+    """480×640 all-black binary mask. No grooves."""
+    return np.zeros((480, 640), dtype=np.uint8)
 
 
 @pytest.fixture
-def frame_with_tiny_dot():
-    """Black frame with a tiny white circle (radius=2). Contour < CONTOUR_MIN_PIXELS."""
-    frame = np.zeros((480, 640, 3), dtype=np.uint8)
-    cv2.circle(frame, (50, 50), 2, (255, 255, 255), -1)
-    return frame
+def mask_rectangle():
+    """Thin white rectangle outline — a single long closed chain."""
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    cv2.rectangle(mask, (100, 100), (300, 300), 255, 1)
+    return mask
 
 
 @pytest.fixture
-def frame_with_two_rectangles():
-    """Two white rectangles in opposite quadrants — used for TSP ordering tests."""
-    frame = np.zeros((480, 640, 3), dtype=np.uint8)
-    cv2.rectangle(frame, (50, 50), (150, 150), (255, 255, 255), -1)     # top-left
-    cv2.rectangle(frame, (490, 330), (590, 430), (255, 255, 255), -1)   # bottom-right
-    return frame
+def mask_tiny_dot():
+    """A 2-pixel dot — below CONTOUR_MIN_PIXELS."""
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    cv2.circle(mask, (50, 50), 1, 255, -1)
+    return mask
 
 
 @pytest.fixture
-def frame_long_line():
-    """Black frame with a single long white horizontal line (200px wide)."""
-    frame = np.zeros((480, 640, 3), dtype=np.uint8)
-    cv2.line(frame, (100, 240), (500, 240), (255, 255, 255), 3)
-    return frame
+def mask_two_lines():
+    """Two separate lines in opposite quadrants — used for TSP ordering tests."""
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    cv2.line(mask, (50, 100), (150, 100), 255, 1)     # top-left
+    cv2.line(mask, (490, 380), (590, 380), 255, 1)    # bottom-right
+    return mask
+
+
+@pytest.fixture
+def mask_long_line():
+    """A single long horizontal line (400px wide)."""
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    cv2.line(mask, (100, 240), (500, 240), 255, 1)
+    return mask
+
+
+# ── Synthetic depth frames (metric, metres) ──────────────────────────────────
+
+@pytest.fixture
+def flat_depth():
+    """480×640 flat surface at 0.30 m — no grooves."""
+    return np.full((480, 640), 0.30, dtype=np.float32)
+
+
+@pytest.fixture
+def depth_with_groove():
+    """
+    Flat 0.30 m surface with a horizontal groove carved 3 mm deeper (0.303 m).
+    Deeper = farther from the top-down camera = a positive 'valley' relief.
+    """
+    d = np.full((480, 640), 0.30, dtype=np.float32)
+    cv2.line(d, (100, 240), (500, 240), 0.303, 3)
+    return d
 
 
 # ── Workspace fixture ─────────────────────────────────────────────────────────
@@ -99,14 +120,16 @@ def shared_state_and_lock():
     """Returns (state_dict, lock) matching main.py's shared_state structure."""
     state = {
         "robot_connected":      False,
-        "last_frame_raw_jpg":   None,
-        "last_frame_canny_jpg": None,
+        "last_depth_color_jpg": None,
+        "last_groove_jpg":      None,
         "workspace":            None,
         "pending_workspace":    None,
         "ws_points":            {"p0": None, "px": None, "py": None},
         "freedrive":            False,
         "ee":                   [0.0] * 6,
         "phase":                "idle",
+        "captured_still":       None,
+        "still_dims":           None,
         "strokes":              [],
         "executing":            False,
         "progress":             0.0,
