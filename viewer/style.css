@@ -65,6 +65,9 @@ main {
   position: relative;
   overflow: hidden;
   border-bottom: 1px solid #2a2a2a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 #panel-camera-canny {
@@ -91,14 +94,23 @@ main {
   z-index: 10;
 }
 
-/* Camera feeds — contain (no crop) so full field of view is visible */
-#camera-feed-raw,
+/* Right feed fills the panel; left feed is sized to the image so the crop
+   overlay aligns to the actual pixels (not the letterboxed panel). */
 #camera-feed-canny {
   width: 100%;
   height: 100%;
   object-fit: contain;
   display: block;
   background: #111;
+}
+#camera-feed-raw {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+  background: #111;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 /* ── Captured still + crop overlay ───────────────────────────── */
@@ -151,14 +163,16 @@ main {
 }
 #preview-img.hidden { display: none; }
 
-#preview-toggle {
+#view-toggle,
+#groove-toggle {
   position: absolute;
   top: 8px; right: 8px;
   z-index: 10;
   display: flex;
   gap: 0;
 }
-#preview-toggle.hidden { display: none; }
+#view-toggle.hidden,
+#groove-toggle.hidden { display: none; }
 .seg {
   padding: 3px 9px;
   font-size: 10px;

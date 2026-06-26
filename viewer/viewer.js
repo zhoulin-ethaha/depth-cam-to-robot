@@ -463,11 +463,13 @@ document.getElementById("btn-simulate").addEventListener("click", () => {
 });
 
 /* ── Capture image / Edit / Generate / Retake ──────────────────────────── */
+const leftPanel      = document.getElementById("panel-camera-raw");
 const stillContainer = document.getElementById("still-container");
 const stillImg       = document.getElementById("still-img");
 const cropBox        = document.getElementById("crop-box");
 const previewImg     = document.getElementById("preview-img");
-const previewToggle  = document.getElementById("preview-toggle");
+const viewToggle     = document.getElementById("view-toggle");
+const grooveToggle   = document.getElementById("groove-toggle");
 const editPanel      = document.getElementById("edit-panel");
 const feedRaw        = document.getElementById("camera-feed-raw");
 const feedCanny      = document.getElementById("camera-feed-canny");
@@ -475,38 +477,83 @@ const labelRaw       = document.getElementById("label-raw");
 const labelProcessed = document.getElementById("label-processed");
 
 let stillLoaded  = false;
-let previewMode  = "grooves";                     // "grooves" | "depth"
-let lastPreview  = { grooves: null, depth: null };
-let crop         = { x: 0, y: 0, w: 1, h: 1 };    // normalized to displayed image
+let leftMode     = "depth";                          // left panel: "depth" | "rgb"
+let grooveMode   = "skeleton";                       // right panel: "skeleton" | "mask"
+let lastStill    = { depth: null, rgb: null };       // captured still data URLs
+let lastGroove   = { skeleton: null, mask: null };   // captured groove preview data URLs
+let crop         = { x: 0, y: 0, w: 1, h: 1 };       // normalized to displayed image
+
+/* True while the captured still is showing (vs. the live feed). The crop overlay
+   and groove view follow whichever is active. */
+function editingActive() {
+  return !stillContainer.classList.contains("hidden");
+}
+
+/* The left image currently visible — live feed or captured still. The crop
+   overlay's drag math operates on whichever one is showing. */
+function activeLeftImg() {
+  return editingActive() ? stillImg : feedRaw;
+}
+
+/* Apply the Depth/RGB toggle to whichever left view is showing. Guarded so we
+   don't reset the MJPEG stream (which would flicker) on every state broadcast. */
+function applyLeftView() {
+  const want = leftMode === "depth" ? "/depth" : "/rgb";
+  if (!feedRaw.src.endsWith(want)) feedRaw.src = want;
+  const stillUrl = lastStill[leftMode] || lastStill.depth || lastStill.rgb;
+  if (stillLoaded && stillUrl && stillImg.src !== stillUrl) stillImg.src = stillUrl;
+  labelRaw.textContent = leftMode === "depth" ? "Depth" : "RGB";
+}
+
+/* Apply the Skeleton/Mask toggle to the right panel (live feed or captured preview). */
+function applyGrooveView() {
+  if (editingActive()) {
+    const url = lastGroove[grooveMode];
+    if (url && previewImg.src !== url) previewImg.src = url;
+  } else {
+    const want = grooveMode === "skeleton" ? "/depth/grooves" : "/depth/mask";
+    if (!feedCanny.src.endsWith(want)) feedCanny.src = want;
+  }
+  labelProcessed.textContent = grooveMode === "skeleton" ? "Grooves" : "Mask";
+}
 
 /* Show/hide live feeds vs. the captured-still editing UI. Idempotent — safe to
-   call every state broadcast. */
-function showLive() {
+   call every state broadcast. The Detect Grooves panel and crop overlay are
+   shown during live preview too, so grooves can be tuned (and the region
+   cropped) before an image is captured. */
+function showLive(showPanel) {
   feedRaw.classList.remove("hidden");
   feedCanny.classList.remove("hidden");
   stillContainer.classList.add("hidden");
   previewImg.classList.add("hidden");
-  previewToggle.classList.add("hidden");
-  editPanel.classList.add("hidden");
-  labelRaw.textContent       = "Depth";
-  labelProcessed.textContent = "Grooves";
+  viewToggle.classList.remove("hidden");
+  grooveToggle.classList.remove("hidden");
+  editPanel.classList.toggle("hidden", !showPanel);
+  cropBox.classList.toggle("hidden", !showPanel);
+  applyLeftView();
+  applyGrooveView();
+  renderCrop();
 }
 
 function showEditing(phase) {
+  const executing = phase === "executing";
   feedRaw.classList.add("hidden");
   feedCanny.classList.add("hidden");
   stillContainer.classList.remove("hidden");
   previewImg.classList.remove("hidden");
-  previewToggle.classList.remove("hidden");
-  editPanel.classList.toggle("hidden", phase === "executing");
-  labelRaw.textContent       = "Captured";
-  labelProcessed.textContent = previewMode === "grooves" ? "Grooves" : "Depth";
+  viewToggle.classList.remove("hidden");
+  grooveToggle.classList.remove("hidden");
+  editPanel.classList.toggle("hidden", executing);
+  cropBox.classList.toggle("hidden", executing);
+  applyLeftView();
+  applyGrooveView();
+  renderCrop();
 }
 
 function syncEditUI(phase) {
-  if (phase === "previewing" || phase === "idle" || !stillLoaded) {
-    if (!stillLoaded) return showLive();
-    if (phase === "previewing" || phase === "idle") return showLive();
+  if (!stillLoaded || phase === "previewing" || phase === "idle") {
+    showLive(phase === "previewing");   // show the Detect panel + crop while previewing live
+    return;
   }
   showEditing(phase);
 }
@@ -520,8 +567,9 @@ document.getElementById("btn-capture-image").addEventListener("click", () => {
 document.getElementById("btn-retake").addEventListener("click", () => {
   stillLoaded = false;
   buildPathViz(null);
-  showLive();
+  showLive(true);
   sendWS({ type: "retake" });
+  requestAdjust(true);                  // keep the live groove feed in sync with the panel
   setHeaderStatus("robot", true, "Back to live feed.");
 });
 
@@ -532,45 +580,52 @@ document.getElementById("btn-generate").addEventListener("click", () => {
 
 /* ── Incoming still + preview ──────────────────────────────────────────── */
 function handleStill(data) {
-  if (!data.image) return;
+  if (!data.depth && !data.rgb) return;
   stillLoaded = true;
   previewImg.src = "";
-  lastPreview = { grooves: null, depth: null };
-  crop = { x: 0, y: 0, w: 1, h: 1 };
+  lastStill  = { depth: data.depth || null, rgb: data.rgb || null };
+  lastGroove = { skeleton: null, mask: null };
+  // Keep the crop the user drew on the live view — it carries into capture.
 
   // onload only re-lays-out the crop box. It must NOT trigger another adjust,
   // because every preview swaps stillImg.src (below) which re-fires onload.
   stillImg.onload = renderCrop;
-  stillImg.src = data.image;            // show the raw frame instantly…
-  cropBox.classList.remove("hidden");
+  stillImg.src = lastStill[leftMode] || lastStill.depth || lastStill.rgb;
+  labelRaw.textContent = leftMode === "depth" ? "Depth" : "RGB";
   showEditing("editing");
-  requestAdjust(true);                  // …then fetch the adjusted version
+  requestAdjust(true);                  // …then fetch the cropped grooves + mask
   setHeaderStatus("robot", true, "Crop and adjust, then Generate Path.");
 }
 
 function handlePreview(data) {
-  lastPreview.depth   = data.depth   || lastPreview.depth;
-  lastPreview.grooves = data.grooves || lastPreview.grooves;
+  // Right panel: cropped grooves (skeleton) or the thick mask, per the toggle.
+  if (data.grooves) lastGroove.skeleton = data.grooves;
+  if (data.mask)    lastGroove.mask     = data.mask;
+  applyGrooveView();
 
-  // Left "Captured" panel always shows the colorized depth so the view range /
-  // crop are immediately visible as you tune.
-  if (data.depth && stillLoaded) stillImg.src = data.depth;
-
-  applyPreviewMode();
+  // The colorized depth can change with the view-range sliders; refresh the
+  // captured depth so toggling back to it stays current.
+  if (data.depth) {
+    lastStill.depth = data.depth;
+    if (leftMode === "depth" && stillLoaded) stillImg.src = data.depth;
+  }
 }
 
-function applyPreviewMode() {
-  const url = lastPreview[previewMode];
-  if (url) previewImg.src = url;
-  labelProcessed.textContent = previewMode === "grooves" ? "Grooves" : "Depth";
-}
-
-previewToggle.querySelectorAll(".seg").forEach(btn => {
+viewToggle.querySelectorAll(".seg").forEach(btn => {
   btn.addEventListener("click", () => {
-    previewMode = btn.dataset.mode;
-    previewToggle.querySelectorAll(".seg").forEach(b =>
+    leftMode = btn.dataset.view;
+    viewToggle.querySelectorAll(".seg").forEach(b =>
       b.classList.toggle("active", b === btn));
-    applyPreviewMode();
+    applyLeftView();
+  });
+});
+
+grooveToggle.querySelectorAll(".seg").forEach(btn => {
+  btn.addEventListener("click", () => {
+    grooveMode = btn.dataset.groove;
+    grooveToggle.querySelectorAll(".seg").forEach(b =>
+      b.classList.toggle("active", b === btn));
+    applyGrooveView();
   });
 });
 
@@ -618,9 +673,13 @@ function buildParams() {
 
 let adjustTimer = null;
 function requestAdjust(immediate) {
-  if (!stillLoaded) return;
   if (adjustTimer) clearTimeout(adjustTimer);
-  const fire = () => sendWS({ type: "preview_adjust", params: buildParams() });
+  // Before capture → push params to the live feed; after capture → re-process
+  // the frozen still (cropped). Same params either way.
+  const fire = () => sendWS({
+    type: stillLoaded ? "preview_adjust" : "set_groove_params",
+    params: buildParams(),
+  });
   if (immediate) fire();
   else adjustTimer = setTimeout(fire, 120);
 }
@@ -642,15 +701,18 @@ document.getElementById("btn-crop-reset").addEventListener("click", () => {
 });
 
 /* ── Crop overlay (drag to draw / move / resize) ───────────────────────── */
+/* The overlay lives on the left panel and tracks the active image (live depth
+   feed or captured still), so a region can be cropped before *or* after capture. */
 function imgContentRect() {
-  const cr = stillContainer.getBoundingClientRect();
-  const ir = stillImg.getBoundingClientRect();
+  const cr = leftPanel.getBoundingClientRect();
+  const ir = activeLeftImg().getBoundingClientRect();
   return { ox: ir.left - cr.left, oy: ir.top - cr.top, w: ir.width, h: ir.height };
 }
 
 function renderCrop() {
-  if (!stillLoaded) return;
+  if (cropBox.classList.contains("hidden")) return;
   const r = imgContentRect();
+  if (r.w === 0 || r.h === 0) return;
   cropBox.style.left   = (r.ox + crop.x * r.w) + "px";
   cropBox.style.top    = (r.oy + crop.y * r.h) + "px";
   cropBox.style.width  = (crop.w * r.w) + "px";
@@ -660,7 +722,7 @@ function renderCrop() {
 function clamp01(v) { return Math.min(Math.max(v, 0), 1); }
 
 function ptNorm(e) {
-  const ir = stillImg.getBoundingClientRect();
+  const ir = activeLeftImg().getBoundingClientRect();
   return {
     x: clamp01((e.clientX - ir.left) / ir.width),
     y: clamp01((e.clientY - ir.top)  / ir.height),
@@ -669,8 +731,10 @@ function ptNorm(e) {
 
 let dragMode = null, dragStart = null, cropStart = null;
 
-stillContainer.addEventListener("mousedown", (e) => {
-  if (!stillLoaded) return;
+leftPanel.addEventListener("mousedown", (e) => {
+  // No cropping when the overlay is hidden (idle), or when clicking the toggle.
+  if (cropBox.classList.contains("hidden")) return;
+  if (e.target.closest("#view-toggle")) return;
   const handle = e.target.closest(".crop-handle");
   const p = ptNorm(e);
   if (handle) {
@@ -721,7 +785,7 @@ function onCropUp() {
   requestAdjust(true);
 }
 
-new ResizeObserver(renderCrop).observe(stillContainer);
+new ResizeObserver(renderCrop).observe(leftPanel);
 initAdjustControls();
 
 /* ── Run / Cancel buttons ──────────────────────────────────────────────── */

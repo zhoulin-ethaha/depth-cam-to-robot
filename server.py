@@ -9,7 +9,7 @@ from aiohttp import web
 
 from config import (
     HTTP_HOST, HTTP_PORT, VIS_INTERVAL,
-    DEPTH_PATH, GROOVE_PATH, WS_PATH, STATIC_PATH,
+    DEPTH_PATH, RGB_PATH, GROOVE_PATH, MASK_PATH, WS_PATH, STATIC_PATH,
 )
 from settings import load_settings
 
@@ -47,6 +47,7 @@ class Server:
         on_retake: Optional[Callable] = None,
         on_run: Optional[Callable] = None,
         on_cancel: Optional[Callable] = None,
+        on_set_groove_params: Optional[Callable] = None,
     ):
         self._state = shared_state
         self._lock = state_lock
@@ -67,6 +68,7 @@ class Server:
         self._on_retake = on_retake
         self._on_run = on_run
         self._on_cancel = on_cancel
+        self._on_set_groove_params = on_set_groove_params
         self._ws_clients: set[web.WebSocketResponse] = set()
         self._app = self._build_app()
 
@@ -74,7 +76,9 @@ class Server:
         app = web.Application(middlewares=[_no_cache_static])
         app.router.add_get("/", self._handle_index)
         app.router.add_get(DEPTH_PATH, self._handle_depth)
+        app.router.add_get(RGB_PATH, self._handle_rgb)
         app.router.add_get(GROOVE_PATH, self._handle_grooves)
+        app.router.add_get(MASK_PATH, self._handle_mask)
         app.router.add_get(WS_PATH, self._handle_ws)
         app.router.add_static(STATIC_PATH, _VIEWER_DIR, show_index=False)
         return app
@@ -114,8 +118,14 @@ class Server:
     async def _handle_depth(self, request: web.Request) -> web.StreamResponse:
         return await self._mjpeg_stream(request, "last_depth_color_jpg")
 
+    async def _handle_rgb(self, request: web.Request) -> web.StreamResponse:
+        return await self._mjpeg_stream(request, "last_rgb_jpg")
+
     async def _handle_grooves(self, request: web.Request) -> web.StreamResponse:
         return await self._mjpeg_stream(request, "last_groove_jpg")
+
+    async def _handle_mask(self, request: web.Request) -> web.StreamResponse:
+        return await self._mjpeg_stream(request, "last_mask_jpg")
 
     async def _handle_ws(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse()
@@ -217,6 +227,10 @@ class Server:
             if self._on_cancel:
                 asyncio.create_task(self._on_cancel(ws))
 
+        elif msg_type == "set_groove_params":
+            if self._on_set_groove_params:
+                asyncio.create_task(self._on_set_groove_params(data.get("params", {})))
+
     async def _broadcast_loop(self) -> None:
         while True:
             await asyncio.sleep(VIS_INTERVAL)
@@ -284,12 +298,14 @@ class Server:
             return None
         return "data:image/jpeg;base64," + base64.b64encode(jpg).decode("ascii")
 
-    async def send_still(self, ws, jpg: Optional[bytes], width: int, height: int) -> None:
-        """Send the frozen still image (as a data URL) plus its pixel dimensions."""
+    async def send_still(self, ws, depth_jpg: Optional[bytes], rgb_jpg: Optional[bytes],
+                         width: int, height: int) -> None:
+        """Send the frozen still (colorized depth + aligned RGB) plus its dimensions."""
         try:
             await ws.send_str(json.dumps({
                 "type": "still",
-                "image": self._data_url(jpg),
+                "depth": self._data_url(depth_jpg),
+                "rgb": self._data_url(rgb_jpg),
                 "width": width,
                 "height": height,
             }))
@@ -297,13 +313,15 @@ class Server:
             pass
 
     async def send_preview(self, ws, depth_jpg: Optional[bytes],
-                           grooves_jpg: Optional[bytes]) -> None:
-        """Send the live edit preview: colorized depth + detected grooves (data URLs)."""
+                           grooves_jpg: Optional[bytes],
+                           mask_jpg: Optional[bytes]) -> None:
+        """Send the edit preview: colorized depth + groove skeleton + thick mask."""
         try:
             await ws.send_str(json.dumps({
                 "type": "preview",
                 "depth": self._data_url(depth_jpg),
                 "grooves": self._data_url(grooves_jpg),
+                "mask": self._data_url(mask_jpg),
             }))
         except Exception:
             pass

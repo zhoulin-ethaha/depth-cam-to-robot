@@ -199,21 +199,23 @@ tools without a port clash.) Closing the browser tab stops the server.
    - Click **Confirm & Start** — saved to `workspace.json` for future sessions.
 
 3. **Aim the RealSense** straight down so it covers the whole sandbox. The left panel
-   shows the colorized depth (near = blue → far = red); the right panel shows a live
-   groove preview.
+   shows the live feed — toggle **Depth** (near = blue → far = red) / **RGB** — and the
+   right panel shows the live detection, toggleable between **Skeleton** (the 1-px
+   centrelines that become the path) and **Mask** (the thick detected region, which
+   shows groove *width* and is handy while tuning).
 
-4. **Capture Image** — freezes a temporally averaged depth frame and switches to the
-   editing view.
+4. **Tune detection live** — the **Detect Grooves** panel is available *before* you
+   capture. Pick a **Mode** (Valley / Ridge / Band) and adjust **Groove depth**,
+   **Surface scale**, **Denoise**, and **Min blob**; the right panel updates in real
+   time. You can also drag a **crop** rectangle directly on the live view to limit the
+   region — the Skeleton/Mask panel then shows only the cropped area.
 
-5. **Detect Grooves** — in the panel:
-   - Drag on the depth still to draw a **crop** rectangle (drag inside to move,
-     corners to resize; **Reset Crop** restores the full frame). The crop selects
-     which part of the workspace gets drawn — strokes stay correctly positioned.
-   - Pick a **Mode** (Valley / Ridge / Band) and tune **Groove depth**, **Surface
-     scale**, **Denoise**, and **Min blob** until the grooves show as clean white
-     centrelines with little background noise.
-   - The right panel toggles between **Grooves** (what becomes the path) and **Depth**
-     (the colorized depth). Depth-view range sliders are display-only.
+5. **Capture Image** — freezes a temporally averaged depth (+ aligned colour) frame;
+   the crop you drew carries over (adjust it on the still: drag inside to move, corners
+   to resize; **Reset Crop** restores the full frame). Detection — and the generated
+   path — cover only the cropped region, while strokes stay correctly positioned in the
+   workspace. Toggle the left panel between **Depth** and **RGB**, and the right between
+   **Skeleton** and **Mask**, at any time. (Depth-view range sliders are display-only.)
 
 6. **Generate Path** — the 3D viewer shows the extracted path (green = pen-down,
    grey = pen-up travel). Re-tune and regenerate freely, or **Retake** for a fresh

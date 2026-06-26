@@ -135,19 +135,19 @@ class DepthGrooveParams:
         )
 
 
-def grooves_from_depth(
+def groove_mask(
     depth_m: np.ndarray,
     valid: np.ndarray | None = None,
     params: DepthGrooveParams = DepthGrooveParams(),
-    skeleton: bool = True,
 ) -> np.ndarray:
     """
-    depth_m  : HxW float, metres. 0 or NaN = no reading.
-    valid    : optional HxW bool mask of trustworthy pixels (else inferred).
-    skeleton : True → thin to 1-px centrelines (path source); False → return the
-               cleaned binary blob (cheaper, used for the live preview).
-    returns  : HxW uint8 binary (white on black), ready for
-               path_extractor.extract_from_edges().
+    The thick (cleaned) groove mask — every pixel detected as a groove, before
+    thinning. This is the 'detected region' view: width reflects how wide/deep
+    each mark is. All Detect-Grooves parameters shape it.
+
+    depth_m : HxW float, metres. 0 or NaN = no reading.
+    valid   : optional HxW bool mask of trustworthy pixels (else inferred).
+    returns : HxW uint8 binary (white on black).
     """
     d = np.asarray(depth_m, dtype=np.float32).copy()
     if valid is None:
@@ -178,8 +178,33 @@ def grooves_from_depth(
     mask_u8 = (mask.astype(np.uint8)) * 255
     mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
     mask_u8 = _remove_small(mask_u8, params.min_blob_px)
+    return mask_u8
 
+
+def grooves_from_depth(
+    depth_m: np.ndarray,
+    valid: np.ndarray | None = None,
+    params: DepthGrooveParams = DepthGrooveParams(),
+    skeleton: bool = True,
+) -> np.ndarray:
+    """
+    Convenience wrapper. ``skeleton=True`` thins the mask to 1-px centrelines
+    (the path source); ``skeleton=False`` returns the thick mask. ready for
+    path_extractor.extract_from_edges().
+    """
+    mask_u8 = groove_mask(depth_m, valid, params)
     return _skeletonize(mask_u8) if skeleton else mask_u8
+
+
+def grooves_and_mask(
+    depth_m: np.ndarray,
+    valid: np.ndarray | None = None,
+    params: DepthGrooveParams = DepthGrooveParams(),
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (thick mask, skeleton). The mask is computed once and thinned, so
+    both views are available without re-running the detrend pipeline twice."""
+    mask_u8 = groove_mask(depth_m, valid, params)
+    return mask_u8, _skeletonize(mask_u8)
 
 
 # ── Depth → colour for display ────────────────────────────────────────────────
@@ -220,6 +245,7 @@ def colorize_depth(
 class ProcessedDepth:
     color_full: np.ndarray   # BGR uint8, FULL frame colorized depth (the view)
     grooves: np.ndarray      # uint8 binary, cropped — groove centrelines (path source)
+    mask: np.ndarray         # uint8 binary, cropped — thick detected-region mask
     origin: tuple[int, int]  # (x0, y0) pixel offset of the crop in the full frame
 
 
@@ -232,8 +258,8 @@ def process_depth(
     """
     Colorize the FULL depth frame (so the crop box overlays the same image the
     user sees), then run groove detection on the cropped depth. Returns the full
-    colorized view, the cropped groove centrelines, and the crop's pixel origin
-    so extracted strokes can be shifted back into full-frame coordinates.
+    colorized view, the cropped groove centrelines + thick mask, and the crop's
+    pixel origin so extracted strokes can be shifted back into full-frame coords.
     """
     d = np.asarray(depth_m, dtype=np.float32)
     if valid is None:
@@ -245,9 +271,9 @@ def process_depth(
     x0, y0, x1, y1 = crop.pixel_box(w, h)
     sub_d = d[y0:y1, x0:x1]
     sub_v = valid[y0:y1, x0:x1]
-    grooves = grooves_from_depth(sub_d, sub_v, params, skeleton=True)
+    mask, grooves = grooves_and_mask(sub_d, sub_v, params)
 
-    return ProcessedDepth(color_full=color_full, grooves=grooves, origin=(x0, y0))
+    return ProcessedDepth(color_full=color_full, grooves=grooves, mask=mask, origin=(x0, y0))
 
 
 def encode_jpeg(img_gray_or_bgr: np.ndarray, quality: int = 80) -> bytes | None:

@@ -121,6 +121,7 @@ def shared_state_and_lock():
     state = {
         "robot_connected":      False,
         "last_depth_color_jpg": None,
+        "last_rgb_jpg":         None,
         "last_groove_jpg":      None,
         "workspace":            None,
         "pending_workspace":    None,

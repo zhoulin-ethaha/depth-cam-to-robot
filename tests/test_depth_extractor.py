@@ -13,6 +13,8 @@ from depth_extractor import (
     DepthGrooveParams,
     ProcessedDepth,
     colorize_depth,
+    groove_mask,
+    grooves_and_mask,
     grooves_from_depth,
     process_depth,
 )
@@ -50,6 +52,13 @@ class TestGroovesFromDepth:
         thick = grooves_from_depth(depth_with_groove, skeleton=False)
         assert (thin > 0).sum() <= (thick > 0).sum()
         assert (thick > 0).sum() > 0
+
+    def test_grooves_and_mask_matches_individual_calls(self, depth_with_groove):
+        mask, skel = grooves_and_mask(depth_with_groove)
+        # mask == the thick mask; skel == its skeleton.
+        assert (mask == groove_mask(depth_with_groove)).all()
+        assert (skel == grooves_from_depth(depth_with_groove, skeleton=True)).all()
+        assert (skel > 0).sum() <= (mask > 0).sum()
 
     def test_ridge_mode_ignores_a_valley(self, depth_with_groove):
         # The synthetic groove is a depression, so ridge detection finds nothing.
@@ -102,14 +111,18 @@ class TestProcessDepth:
         assert isinstance(proc, ProcessedDepth)
         assert proc.color_full.shape == (480, 640, 3)
         assert proc.grooves.shape == (480, 640)
+        assert proc.mask.shape == (480, 640)
         assert proc.origin == (0, 0)
         assert proc.grooves.max() == 255
+        # Mask is the thick detected region; skeleton is its thinning.
+        assert (proc.grooves > 0).sum() <= (proc.mask > 0).sum()
 
     def test_crop_shifts_origin_and_shrinks_grooves(self, depth_with_groove):
         crop = Crop(0.25, 0.25, 0.5, 0.5)
         proc = process_depth(depth_with_groove, None, crop, DepthGrooveParams())
         assert proc.origin == (160, 120)              # 0.25*640, 0.25*480
         assert proc.grooves.shape == (240, 320)       # 0.5*480, 0.5*640
+        assert proc.mask.shape == (240, 320)
         # The colorized view is always the full frame so the crop box overlays it.
         assert proc.color_full.shape == (480, 640, 3)
 

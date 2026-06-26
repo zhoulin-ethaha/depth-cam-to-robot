@@ -9,7 +9,7 @@ from config import (
     DEPTH_WIDTH, DEPTH_HEIGHT, DEPTH_FPS, DEPTH_AVERAGE_FRAMES,
 )
 from depth_extractor import (
-    DepthGrooveParams, colorize_depth, grooves_from_depth, encode_jpeg,
+    Crop, DepthGrooveParams, colorize_depth, grooves_and_mask, encode_jpeg,
 )
 
 # How often (in frames) to recompute the live groove preview. Groove detection
@@ -20,16 +20,21 @@ _LIVE_GROOVE_EVERY = 4
 
 class DepthCameraThread:
     """
-    Captures depth frames from an Intel RealSense (D435i) and produces two JPEG
-    streams:
-      - depth:   the depth map colorized so depth reads as colour (the live view)
+    Captures depth + colour frames from an Intel RealSense (D435i) and produces
+    three JPEG streams:
+      - depth:   the depth map colorized so depth reads as colour
+      - rgb:     the aligned colour image
       - grooves: detected groove centrelines (live preview of what gets drawn)
 
-    Both streams are stored in shared_state and served as MJPEG by the server.
-    The raw metric depth of the most recent frames is buffered so Capture can
-    return a temporally averaged frame — the single biggest win for resolving
-    sub-millimetre grooves. A separate lock guards the buffer so capture_frame()
-    doesn't block MJPEG delivery.
+    All three are stored in shared_state and served as MJPEG by the server. The
+    colour stream is aligned to the depth frame so a crop in normalized
+    coordinates selects the same region in both. The raw metric depth of recent
+    frames is buffered so Capture can return a temporally averaged frame — the
+    single biggest win for resolving sub-millimetre grooves. A separate lock
+    guards the buffers so capture_frame() doesn't block MJPEG delivery.
+
+    The live groove preview honours `set_live_params()` so the browser's Detect
+    Grooves controls update the feed in real time, before any image is captured.
     """
 
     def __init__(self, shared_state: dict, state_lock: threading.Lock) -> None:
@@ -40,7 +45,10 @@ class DepthCameraThread:
         self._frame_lock = threading.Lock()
         # Rolling buffer of (depth_m float32, valid bool) for temporal averaging.
         self._buffer: deque[tuple[np.ndarray, np.ndarray]] = deque(maxlen=DEPTH_AVERAGE_FRAMES)
+        self._last_rgb: Optional[np.ndarray] = None
+        # Live detection params + crop (atomically swapped by the setters).
         self._live_params = DepthGrooveParams()
+        self._live_crop = Crop()
 
     @property
     def running(self) -> bool:
@@ -61,16 +69,26 @@ class DepthCameraThread:
             self._thread.join(timeout=2.0)
             self._thread = None
 
-    def capture_frame(self) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    def set_live_params(self, params: DepthGrooveParams) -> None:
+        """Update the params used for the live depth colormap + groove preview."""
+        self._live_params = params
+
+    def set_live_crop(self, crop: Crop) -> None:
+        """Restrict the live groove/mask preview to this normalized crop region."""
+        self._live_crop = crop
+
+    def capture_frame(self) -> Optional[tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]]:
         """
-        Return a temporally averaged (depth_m, valid) over the buffered frames, or
-        None if no frame has arrived yet. Used by Capture; averaging cuts per-pixel
-        depth noise by ~sqrt(n_frames).
+        Return a temporally averaged (depth_m, valid, rgb) over the buffered
+        frames, or None if no frame has arrived yet. ``rgb`` is the most recent
+        aligned colour frame (BGR), or None if the colour stream produced nothing.
+        Averaging cuts per-pixel depth noise by ~sqrt(n_frames).
         """
         with self._frame_lock:
             if not self._buffer:
                 return None
             frames = list(self._buffer)
+            rgb = None if self._last_rgb is None else self._last_rgb.copy()
 
         acc = np.zeros_like(frames[0][0], dtype=np.float32)
         cnt = np.zeros_like(acc, dtype=np.float32)
@@ -80,7 +98,7 @@ class DepthCameraThread:
         valid = cnt > 0
         depth_m = np.zeros_like(acc)
         depth_m[valid] = acc[valid] / cnt[valid]
-        return depth_m, valid
+        return depth_m, valid, rgb
 
     def _run(self) -> None:
         try:
@@ -92,57 +110,77 @@ class DepthCameraThread:
         pipe = rs.pipeline()
         cfg = rs.config()
         cfg.enable_stream(rs.stream.depth, DEPTH_WIDTH, DEPTH_HEIGHT, rs.format.z16, DEPTH_FPS)
+        cfg.enable_stream(rs.stream.color, DEPTH_WIDTH, DEPTH_HEIGHT, rs.format.bgr8, DEPTH_FPS)
 
         try:
             profile = pipe.start(cfg)
         except Exception as exc:
-            print(f"[depth] ERROR: cannot start RealSense depth stream: {exc}")
+            print(f"[depth] ERROR: cannot start RealSense streams: {exc}")
             return
 
         scale = profile.get_device().first_depth_sensor().get_depth_scale()  # metres/unit
+        align = rs.align(rs.stream.depth)  # bring colour into the depth pixel grid
         print(f"[depth] started RealSense {DEPTH_WIDTH}×{DEPTH_HEIGHT}@{DEPTH_FPS} "
-              f"(depth scale {scale:.6f} m/unit)")
+              f"depth+colour (depth scale {scale:.6f} m/unit)")
 
         frame_i = 0
         last_groove_jpg: Optional[bytes] = None
+        last_mask_jpg: Optional[bytes] = None
         try:
             while not self._stop_event.is_set():
                 try:
-                    frames = pipe.wait_for_frames(2000)
+                    frames = align.process(pipe.wait_for_frames(2000))
                 except Exception:
                     continue
                 depth_frame = frames.get_depth_frame()
                 if not depth_frame:
                     continue
+                color_frame = frames.get_color_frame()
 
                 z = np.asarray(depth_frame.get_data(), dtype=np.float32) * scale  # metres
                 ok = z > 0
+                params = self._live_params
 
-                # Colorized depth — the live "depth" view.
-                color = colorize_depth(z, ok, self._live_params.near_m, self._live_params.far_m)
+                # Colorized depth (FULL frame — the crop box overlays it client-side).
+                color = colorize_depth(z, ok, params.near_m, params.far_m)
                 ok_color, color_jpg = cv2.imencode(".jpg", color, [cv2.IMWRITE_JPEG_QUALITY, 80])
 
-                # Live groove preview (throttled; skeleton=False keeps it cheap).
+                # Aligned RGB — the live "rgb" view.
+                rgb = np.asarray(color_frame.get_data()) if color_frame else None
+                rgb_jpg = encode_jpeg(rgb) if rgb is not None else None
+
+                # Live groove + mask preview, restricted to the live crop (throttled).
                 if frame_i % _LIVE_GROOVE_EVERY == 0:
-                    groove = grooves_from_depth(z, ok, self._live_params, skeleton=False)
-                    gj = encode_jpeg(groove)
-                    if gj is not None:
-                        last_groove_jpg = gj
+                    h, w = z.shape[:2]
+                    x0, y0, x1, y1 = self._live_crop.pixel_box(w, h)
+                    mask, skel = grooves_and_mask(z[y0:y1, x0:x1], ok[y0:y1, x0:x1], params)
+                    sj, mj = encode_jpeg(skel), encode_jpeg(mask)
+                    if sj is not None:
+                        last_groove_jpg = sj
+                    if mj is not None:
+                        last_mask_jpg = mj
                 frame_i += 1
 
                 if ok_color:
                     with self._state_lock:
                         self._state["last_depth_color_jpg"] = color_jpg.tobytes()
+                        self._state["last_rgb_jpg"] = rgb_jpg
                         self._state["last_groove_jpg"] = last_groove_jpg
+                        self._state["last_mask_jpg"] = last_mask_jpg
 
-                # Buffer raw metric depth for averaged Capture.
+                # Buffer raw metric depth (+ latest RGB) for averaged Capture.
                 with self._frame_lock:
                     self._buffer.append((z, ok))
+                    if rgb is not None:
+                        self._last_rgb = rgb
         finally:
             pipe.stop()
             with self._state_lock:
                 self._state["last_depth_color_jpg"] = None
+                self._state["last_rgb_jpg"] = None
                 self._state["last_groove_jpg"] = None
+                self._state["last_mask_jpg"] = None
             with self._frame_lock:
                 self._buffer.clear()
+                self._last_rgb = None
             print("[depth] stopped")

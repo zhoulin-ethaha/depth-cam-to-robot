@@ -8,7 +8,9 @@ from pathlib import Path
 HTTP_HOST    = "localhost"
 HTTP_PORT    = 5005
 DEPTH_PATH   = "/depth"             # MJPEG: colorized depth (the live view)
-GROOVE_PATH  = "/depth/grooves"     # MJPEG: detected groove centrelines
+RGB_PATH     = "/rgb"               # MJPEG: aligned colour image
+GROOVE_PATH  = "/depth/grooves"     # MJPEG: detected groove centrelines (skeleton)
+MASK_PATH    = "/depth/mask"        # MJPEG: thick detected-region mask
 WS_PATH      = "/ws"
 STATIC_PATH  = "/static"
 

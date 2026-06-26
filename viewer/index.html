@@ -22,28 +22,34 @@
 
       <div class="panel" id="panel-camera-raw">
         <div class="panel-label" id="label-raw">Depth</div>
-        <img id="camera-feed-raw" src="/depth" alt="colorized depth feed" />
+        <div id="view-toggle">
+          <button class="seg active" data-view="depth">Depth</button>
+          <button class="seg" data-view="rgb">RGB</button>
+        </div>
+        <img id="camera-feed-raw" src="/depth" alt="depth / colour feed" />
 
-        <!-- Captured still + crop overlay (shown while editing) -->
+        <!-- Captured still (shown while editing) -->
         <div id="still-container" class="hidden">
-          <img id="still-img" alt="captured depth still" />
-          <div id="crop-box" class="hidden">
-            <div class="crop-handle" data-h="nw"></div>
-            <div class="crop-handle" data-h="ne"></div>
-            <div class="crop-handle" data-h="sw"></div>
-            <div class="crop-handle" data-h="se"></div>
-          </div>
+          <img id="still-img" alt="captured still" />
+        </div>
+
+        <!-- Crop overlay — works on both the live feed and the captured still -->
+        <div id="crop-box" class="hidden">
+          <div class="crop-handle" data-h="nw"></div>
+          <div class="crop-handle" data-h="ne"></div>
+          <div class="crop-handle" data-h="sw"></div>
+          <div class="crop-handle" data-h="se"></div>
         </div>
       </div>
 
       <div class="panel" id="panel-camera-canny">
         <div class="panel-label" id="label-processed">Grooves</div>
-        <div id="preview-toggle" class="hidden">
-          <button id="btn-show-grooves" class="seg active" data-mode="grooves">Grooves</button>
-          <button id="btn-show-depth" class="seg" data-mode="depth">Depth</button>
+        <div id="groove-toggle">
+          <button class="seg active" data-groove="skeleton">Skeleton</button>
+          <button class="seg" data-groove="mask">Mask</button>
         </div>
         <img id="camera-feed-canny" src="/depth/grooves" alt="groove detection feed" />
-        <img id="preview-img" class="hidden" alt="processed preview" />
+        <img id="preview-img" class="hidden" alt="grooves preview" />
       </div>
 
     </div>
@@ -54,7 +60,7 @@
         <span>Detect Grooves</span>
         <button id="btn-reset-adjust" title="Reset all groove parameters">Reset</button>
       </div>
-      <p id="edit-hint">Tune until the raked grooves stand out as clean white centrelines, then Generate Path. The left panel shows the colorized depth; the right panel shows the detected grooves the robot will draw.</p>
+      <p id="edit-hint">Tune until the raked grooves stand out as clean white centrelines — the right panel updates live, even before you capture. The left panel toggles Depth / RGB. Then <b>Capture Image</b>, drag a crop on the still to limit the area (the grooves and path preview then show only that region), and <b>Generate Path</b>.</p>
 
       <div class="adj-group-title">Detection</div>
       <div class="adj-row">

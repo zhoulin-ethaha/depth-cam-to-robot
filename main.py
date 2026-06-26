@@ -31,14 +31,16 @@ from workspace import WorkspaceConfig
 shared_state: dict = {
     "robot_connected":     False,
     "last_depth_color_jpg": None,    # colorized depth (live view)
-    "last_groove_jpg":     None,     # detected grooves (live preview)
+    "last_rgb_jpg":        None,     # aligned colour image (live view)
+    "last_groove_jpg":     None,     # detected groove skeleton (live preview)
+    "last_mask_jpg":       None,     # thick detected-region mask (live preview)
     "workspace":           None,     # WorkspaceConfig | None — confirmed workspace
     "pending_workspace":   None,     # WorkspaceConfig | None — loaded from disk
     "ws_points":           {"p0": None, "px": None, "py": None},
     "freedrive":           False,
     "ee":                  [0.0] * 6,
     "phase":               "idle",     # idle|previewing|editing|captured|executing|done|error
-    "captured_still":      None,       # (depth_m, valid) — frozen averaged depth frame
+    "captured_still":      None,       # (depth_m, valid, rgb) — frozen averaged depth + colour
     "still_dims":          None,       # (width, height) of the captured still
     "strokes":             [],         # robot-space strokes after Generate Path
     "executing":           False,
@@ -234,26 +236,37 @@ async def on_reset_workspace() -> None:
 
 
 # ── Capture image / Edit / Generate path callbacks ───────────────────────────
+async def on_set_groove_params(params: dict) -> None:
+    """Push the latest Detect-Grooves params + crop to the camera thread so the
+    LIVE depth/groove feeds update in real time (used before an image is captured).
+    The crop restricts the live groove/mask preview to the selected region."""
+    gp = DepthGrooveParams.from_dict(params.get("adjustments"))
+    crop = Crop.from_dict(params.get("crop"))
+    camera_thread.set_live_params(gp)
+    camera_thread.set_live_crop(crop)
+
+
 async def on_capture_image(ws) -> None:
-    """Freeze a temporally averaged depth frame as a still and enter editing."""
+    """Freeze a temporally averaged depth (+ colour) frame and enter editing."""
     captured = camera_thread.capture_frame()
     if captured is None:
         await server.send_capture_result(ws, False, error="No depth frame available.")
         return
 
-    depth_m, valid = captured
+    depth_m, valid, rgb = captured
     h, w = depth_m.shape[:2]
     with state_lock:
-        shared_state["captured_still"] = (depth_m, valid)
+        shared_state["captured_still"] = (depth_m, valid, rgb)
         shared_state["still_dims"]     = (w, h)
         shared_state["phase"]          = "editing"
         shared_state["strokes"]        = []
 
     loop = asyncio.get_running_loop()
     color = await loop.run_in_executor(None, colorize_depth, depth_m, valid)
-    jpg = await loop.run_in_executor(None, encode_jpeg, color)
-    await server.send_still(ws, jpg, width=w, height=h)
-    print(f"Captured depth still: {w}×{h} — ready for crop/adjust")
+    depth_jpg = await loop.run_in_executor(None, encode_jpeg, color)
+    rgb_jpg = await loop.run_in_executor(None, encode_jpeg, rgb) if rgb is not None else None
+    await server.send_still(ws, depth_jpg=depth_jpg, rgb_jpg=rgb_jpg, width=w, height=h)
+    print(f"Captured still: {w}×{h} (depth+colour) — ready for crop/adjust")
 
 
 async def on_preview_adjust(ws, params: dict) -> None:
@@ -263,7 +276,7 @@ async def on_preview_adjust(ws, params: dict) -> None:
     if still is None:
         return
 
-    depth_m, valid = still
+    depth_m, valid, _rgb = still
     crop   = Crop.from_dict(params.get("crop"))
     gp     = DepthGrooveParams.from_dict(params.get("adjustments"))
 
@@ -276,7 +289,8 @@ async def on_preview_adjust(ws, params: dict) -> None:
 
     depth_jpg   = await loop.run_in_executor(None, encode_jpeg, processed.color_full)
     grooves_jpg = await loop.run_in_executor(None, encode_jpeg, processed.grooves)
-    await server.send_preview(ws, depth_jpg=depth_jpg, grooves_jpg=grooves_jpg)
+    mask_jpg    = await loop.run_in_executor(None, encode_jpeg, processed.mask)
+    await server.send_preview(ws, depth_jpg=depth_jpg, grooves_jpg=grooves_jpg, mask_jpg=mask_jpg)
 
 
 async def on_generate_path(ws, params: dict) -> None:
@@ -293,7 +307,7 @@ async def on_generate_path(ws, params: dict) -> None:
         await server.send_capture_result(ws, False, error="No captured depth — press Capture first.")
         return
 
-    depth_m, valid = still
+    depth_m, valid, _rgb = still
     width, height  = dims
     crop = Crop.from_dict(params.get("crop"))
     gp   = DepthGrooveParams.from_dict(params.get("adjustments"))
@@ -387,6 +401,7 @@ server = Server(
     on_retake=on_retake,
     on_run=on_run,
     on_cancel=on_cancel,
+    on_set_groove_params=on_set_groove_params,
 )
 
 # Camera starts immediately so both MJPEG feeds are live from the moment you open the browser

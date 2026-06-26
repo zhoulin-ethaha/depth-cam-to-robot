@@ -80,7 +80,7 @@ def test_extract_from_live_depth(shared_state_and_lock):
     ct.stop()
 
     assert captured is not None, "No depth captured — is the RealSense connected?"
-    depth_m, valid = captured
+    depth_m, valid, _rgb = captured
     grooves = grooves_from_depth(depth_m, valid)
     result = extract_from_edges(grooves)
     assert result.total_strokes > 0, "No grooves found — rake some marks into the sand"
@@ -185,7 +185,7 @@ def test_full_pipeline_flat_sand(shared_state_and_lock):
     assert captured is not None
 
     # Extraction — expects flat sand
-    depth_m, valid = captured
+    depth_m, valid, _rgb = captured
     extracted = extract_from_edges(grooves_from_depth(depth_m, valid))
     assert extracted.total_strokes == 0, "Expected flat sand — smooth out any grooves"
 
@@ -232,7 +232,7 @@ def test_full_pipeline_raked_groove(shared_state_and_lock):
     ct.stop()
     assert captured is not None
 
-    depth_m, valid = captured
+    depth_m, valid, _rgb = captured
     extracted = extract_from_edges(grooves_from_depth(depth_m, valid))
     assert extracted.total_strokes > 0, "No grooves detected — rake some marks into the sand"
 
