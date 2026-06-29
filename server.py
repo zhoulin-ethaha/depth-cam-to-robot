@@ -48,6 +48,8 @@ class Server:
         on_run: Optional[Callable] = None,
         on_cancel: Optional[Callable] = None,
         on_set_groove_params: Optional[Callable] = None,
+        on_set_reference: Optional[Callable] = None,
+        on_clear_reference: Optional[Callable] = None,
     ):
         self._state = shared_state
         self._lock = state_lock
@@ -69,6 +71,8 @@ class Server:
         self._on_run = on_run
         self._on_cancel = on_cancel
         self._on_set_groove_params = on_set_groove_params
+        self._on_set_reference = on_set_reference
+        self._on_clear_reference = on_clear_reference
         self._ws_clients: set[web.WebSocketResponse] = set()
         self._app = self._build_app()
 
@@ -231,6 +235,14 @@ class Server:
             if self._on_set_groove_params:
                 asyncio.create_task(self._on_set_groove_params(data.get("params", {})))
 
+        elif msg_type == "set_reference":
+            if self._on_set_reference:
+                asyncio.create_task(self._on_set_reference(ws))
+
+        elif msg_type == "clear_reference":
+            if self._on_clear_reference:
+                asyncio.create_task(self._on_clear_reference(ws))
+
     async def _broadcast_loop(self) -> None:
         while True:
             await asyncio.sleep(VIS_INTERVAL)
@@ -322,6 +334,16 @@ class Server:
                 "depth": self._data_url(depth_jpg),
                 "grooves": self._data_url(grooves_jpg),
                 "mask": self._data_url(mask_jpg),
+            }))
+        except Exception:
+            pass
+
+    async def send_reference_status(self, ws, active: bool, message: str) -> None:
+        try:
+            await ws.send_str(json.dumps({
+                "type": "reference_status",
+                "active": active,
+                "message": message,
             }))
         except Exception:
             pass

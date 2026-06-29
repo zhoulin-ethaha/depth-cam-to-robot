@@ -132,6 +132,23 @@ The single biggest quality win is **temporal averaging**: the sand is static, so
 Capture averages `DEPTH_AVERAGE_FRAMES` frames, cutting per-pixel depth noise by
 ~√N before any detection runs.
 
+### Rejecting natural grooves
+
+Sand often has pre-existing ripples/texture that look like grooves. Four optional
+filters (in the **Reject natural grooves** panel section) suppress them — each is
+independent and **disabled at 0**, so you can A/B the difference:
+
+- **Reference subtraction** (`ref_strength`) — capture the *undrawn* sand with **Set
+  Reference**, then subtract that baseline. Pre-existing grooves appear in both the
+  reference and the live frame and **cancel**, leaving only what you drew. The single
+  most reliable discriminator (camera + sandbox must stay still between the two).
+- **Min mean depth** (`min_mean_depth_mm`) — drop whole grooves whose *average* relief
+  is shallow. Hand-raked grooves are consistently a few mm deep; faint ripples aren't.
+- **Min / Max width** (`min_width_mm` / `max_width_mm`) — keep only grooves matching the
+  raking tool's width; rejects thin scratches and broad dishes.
+- **Min length** (`min_length_mm`) — drop short grooves; natural texture breaks into
+  short fragments. (Width and length need a calibrated workspace for the mm scale.)
+
 ---
 
 ## Hardware requirements

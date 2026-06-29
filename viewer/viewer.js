@@ -175,6 +175,8 @@ function connectWS() {
       handlePreview(data);
     } else if (data.type === "capture_result") {
       handleCaptureResult(data);
+    } else if (data.type === "reference_status") {
+      handleReferenceStatus(data);
     } else if (data.type === "execution_update") {
       handleExecutionUpdate(data);
     }
@@ -699,6 +701,25 @@ document.getElementById("btn-crop-reset").addEventListener("click", () => {
   renderCrop();
   requestAdjust(true);
 });
+
+/* ── Reference (background) subtraction ─────────────────────────────────── */
+document.getElementById("btn-set-reference").addEventListener("click", () => {
+  sendWS({ type: "set_reference" });
+  setHeaderStatus("robot", true, "Capturing reference (empty sand)…");
+});
+
+document.getElementById("btn-clear-reference").addEventListener("click", () => {
+  sendWS({ type: "clear_reference" });
+});
+
+function handleReferenceStatus(data) {
+  const btn = document.getElementById("btn-set-reference");
+  btn.classList.toggle("active", data.active);
+  btn.textContent = data.active ? "Reference set ✓ (re-capture)" : "Set Reference (empty sand)";
+  setHeaderStatus("robot", true, data.message || "");
+  // Re-run detection so the change is reflected immediately (live or captured).
+  requestAdjust(true);
+}
 
 /* ── Crop overlay (drag to draw / move / resize) ───────────────────────── */
 /* The overlay lives on the left panel and tracks the active image (live depth

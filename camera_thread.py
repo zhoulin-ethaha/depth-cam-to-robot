@@ -49,6 +49,8 @@ class DepthCameraThread:
         # Live detection params + crop (atomically swapped by the setters).
         self._live_params = DepthGrooveParams()
         self._live_crop = Crop()
+        self._reference: Optional[np.ndarray] = None   # baseline depth for subtraction
+        self._mm_per_px: Optional[float] = None        # workspace scale for mm filters
 
     @property
     def running(self) -> bool:
@@ -76,6 +78,14 @@ class DepthCameraThread:
     def set_live_crop(self, crop: Crop) -> None:
         """Restrict the live groove/mask preview to this normalized crop region."""
         self._live_crop = crop
+
+    def set_reference(self, depth_m: Optional[np.ndarray]) -> None:
+        """Set (or clear with None) the baseline depth frame for background subtraction."""
+        self._reference = depth_m
+
+    def set_scale(self, mm_per_px: Optional[float]) -> None:
+        """Set the workspace scale so the live mm-based width/length filters work."""
+        self._mm_per_px = mm_per_px
 
     def capture_frame(self) -> Optional[tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]]:
         """
@@ -153,7 +163,11 @@ class DepthCameraThread:
                 if frame_i % _LIVE_GROOVE_EVERY == 0:
                     h, w = z.shape[:2]
                     x0, y0, x1, y1 = self._live_crop.pixel_box(w, h)
-                    mask, skel = grooves_and_mask(z[y0:y1, x0:x1], ok[y0:y1, x0:x1], params)
+                    ref = self._reference
+                    ref_sub = ref[y0:y1, x0:x1] if (ref is not None and ref.shape == z.shape) else None
+                    mask, skel = grooves_and_mask(
+                        z[y0:y1, x0:x1], ok[y0:y1, x0:x1], params, ref_sub, self._mm_per_px
+                    )
                     sj, mj = encode_jpeg(skel), encode_jpeg(mask)
                     if sj is not None:
                         last_groove_jpg = sj

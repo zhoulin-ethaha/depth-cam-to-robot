@@ -14,7 +14,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from config import (
-    HTTP_HOST, HTTP_PORT, WORKSPACE_FILE, CONTOUR_MIN_PIXELS,
+    HTTP_HOST, HTTP_PORT, WORKSPACE_FILE, CONTOUR_MIN_PIXELS, DEPTH_WIDTH,
 )
 from camera_thread import DepthCameraThread
 from depth_extractor import (
@@ -41,6 +41,7 @@ shared_state: dict = {
     "ee":                  [0.0] * 6,
     "phase":               "idle",     # idle|previewing|editing|captured|executing|done|error
     "captured_still":      None,       # (depth_m, valid, rgb) — frozen averaged depth + colour
+    "reference_depth":     None,       # baseline depth frame for background subtraction
     "still_dims":          None,       # (width, height) of the captured still
     "strokes":             [],         # robot-space strokes after Generate Path
     "executing":           False,
@@ -236,14 +237,46 @@ async def on_reset_workspace() -> None:
 
 
 # ── Capture image / Edit / Generate path callbacks ───────────────────────────
+def _mm_per_px(workspace) -> float | None:
+    """Millimetres per depth pixel from the workspace calibration (for mm filters)."""
+    if workspace is None:
+        return None
+    return (workspace.x_extent / DEPTH_WIDTH) * 1000.0
+
+
 async def on_set_groove_params(params: dict) -> None:
     """Push the latest Detect-Grooves params + crop to the camera thread so the
     LIVE depth/groove feeds update in real time (used before an image is captured).
     The crop restricts the live groove/mask preview to the selected region."""
     gp = DepthGrooveParams.from_dict(params.get("adjustments"))
     crop = Crop.from_dict(params.get("crop"))
+    with state_lock:
+        workspace = shared_state.get("workspace")
     camera_thread.set_live_params(gp)
     camera_thread.set_live_crop(crop)
+    camera_thread.set_scale(_mm_per_px(workspace))
+
+
+async def on_set_reference(ws) -> None:
+    """Capture the current (undrawn) sand as a baseline for background subtraction."""
+    captured = camera_thread.capture_frame()
+    if captured is None:
+        await server.send_reference_status(ws, False, "No depth frame to set as reference.")
+        return
+    depth_m, _valid, _rgb = captured
+    with state_lock:
+        shared_state["reference_depth"] = depth_m
+    camera_thread.set_reference(depth_m)
+    await server.send_reference_status(ws, True, "Reference captured — natural grooves can be subtracted.")
+    print("Reference depth captured for background subtraction.")
+
+
+async def on_clear_reference(ws) -> None:
+    with state_lock:
+        shared_state["reference_depth"] = None
+    camera_thread.set_reference(None)
+    await server.send_reference_status(ws, False, "Reference cleared.")
+    print("Reference depth cleared.")
 
 
 async def on_capture_image(ws) -> None:
@@ -276,13 +309,20 @@ async def on_preview_adjust(ws, params: dict) -> None:
     if still is None:
         return
 
+    with state_lock:
+        reference = shared_state.get("reference_depth")
+        workspace = shared_state.get("workspace")
+
     depth_m, valid, _rgb = still
     crop   = Crop.from_dict(params.get("crop"))
     gp     = DepthGrooveParams.from_dict(params.get("adjustments"))
+    mmpp   = _mm_per_px(workspace)
 
     loop = asyncio.get_running_loop()
     try:
-        processed = await loop.run_in_executor(None, process_depth, depth_m, valid, crop, gp)
+        processed = await loop.run_in_executor(
+            None, process_depth, depth_m, valid, crop, gp, reference, mmpp
+        )
     except Exception as exc:
         print(f"[preview] processing error: {exc}")
         return
@@ -299,6 +339,7 @@ async def on_generate_path(ws, params: dict) -> None:
         workspace = shared_state.get("workspace")
         still     = shared_state.get("captured_still")
         dims      = shared_state.get("still_dims")
+        reference = shared_state.get("reference_depth")
 
     if workspace is None:
         await server.send_capture_result(ws, False, error="No workspace configured.")
@@ -311,10 +352,13 @@ async def on_generate_path(ws, params: dict) -> None:
     width, height  = dims
     crop = Crop.from_dict(params.get("crop"))
     gp   = DepthGrooveParams.from_dict(params.get("adjustments"))
+    mmpp = _mm_per_px(workspace)
 
     loop = asyncio.get_running_loop()
     try:
-        processed = await loop.run_in_executor(None, process_depth, depth_m, valid, crop, gp)
+        processed = await loop.run_in_executor(
+            None, process_depth, depth_m, valid, crop, gp, reference, mmpp
+        )
         extracted = await loop.run_in_executor(
             None, extract_from_edges, processed.grooves, CONTOUR_MIN_PIXELS, processed.origin
         )
@@ -402,6 +446,8 @@ server = Server(
     on_run=on_run,
     on_cancel=on_cancel,
     on_set_groove_params=on_set_groove_params,
+    on_set_reference=on_set_reference,
+    on_clear_reference=on_clear_reference,
 )
 
 # Camera starts immediately so both MJPEG feeds are live from the moment you open the browser

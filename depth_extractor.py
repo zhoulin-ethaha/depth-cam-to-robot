@@ -101,6 +101,12 @@ class DepthGrooveParams:
     min_blob_px: int = GROOVE_MIN_BLOB_PX              # discard specks smaller than this
     near_m: float = DEPTH_COLOR_NEAR_M  # colormap near plane, 0 = auto
     far_m: float = DEPTH_COLOR_FAR_M    # colormap far plane,  0 = auto
+    # ── Natural-groove rejection (all 0 = off, so each can be A/B compared) ──
+    ref_strength: float = 0.0        # 0..1 — blend of reference (background) subtraction
+    min_mean_depth_mm: float = 0.0   # drop strokes whose mean relief is shallower than this
+    min_width_mm: float = 0.0        # drop strokes narrower than this (needs mm_per_px)
+    max_width_mm: float = 0.0        # drop strokes wider than this (0 = no upper limit)
+    min_length_mm: float = 0.0       # drop strokes shorter than this (needs mm_per_px)
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "DepthGrooveParams":
@@ -132,26 +138,39 @@ class DepthGrooveParams:
             min_blob_px=_i("min_blob_px", GROOVE_MIN_BLOB_PX, 0, 5000),
             near_m=_f("near_m", DEPTH_COLOR_NEAR_M, 0.0, 5.0),
             far_m=_f("far_m", DEPTH_COLOR_FAR_M, 0.0, 5.0),
+            ref_strength=_f("ref_strength", 0.0, 0.0, 1.0),
+            min_mean_depth_mm=_f("min_mean_depth_mm", 0.0, 0.0, 30.0),
+            min_width_mm=_f("min_width_mm", 0.0, 0.0, 50.0),
+            max_width_mm=_f("max_width_mm", 0.0, 0.0, 50.0),
+            min_length_mm=_f("min_length_mm", 0.0, 0.0, 500.0),
         )
 
 
-def groove_mask(
+def _relief_and_base_mask(
     depth_m: np.ndarray,
-    valid: np.ndarray | None = None,
-    params: DepthGrooveParams = DepthGrooveParams(),
-) -> np.ndarray:
+    valid: np.ndarray | None,
+    params: DepthGrooveParams,
+    reference: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    The thick (cleaned) groove mask — every pixel detected as a groove, before
-    thinning. This is the 'detected region' view: width reflects how wide/deep
-    each mark is. All Detect-Grooves parameters shape it.
-
-    depth_m : HxW float, metres. 0 or NaN = no reading.
-    valid   : optional HxW bool mask of trustworthy pixels (else inferred).
-    returns : HxW uint8 binary (white on black).
+    Shared front-end: optional reference subtraction → detrend → threshold →
+    morphological close → small-blob removal. Returns (relief_mm, base_mask_u8,
+    valid). The per-stroke consistency/length filters run on top of this.
     """
     d = np.asarray(depth_m, dtype=np.float32).copy()
     if valid is None:
         valid = np.isfinite(d) & (d > 0)
+
+    # Reference (background) subtraction: cancel pre-existing natural grooves by
+    # subtracting a baseline frame of the undrawn sand. ref_strength blends it in
+    # (0 = off, 1 = full) so its effect can be compared. The detrend below removes
+    # any constant offset this introduces, so only the spatial ripple cancels.
+    if reference is not None and params.ref_strength > 0:
+        ref = np.asarray(reference, dtype=np.float32)
+        if ref.shape == d.shape:
+            both = valid & np.isfinite(ref) & (ref > 0)
+            d[both] = d[both] - params.ref_strength * ref[both]
+
     d[~valid] = np.nan
 
     # Fill gaps so blurring doesn't bleed invalid pixels into the surface estimate.
@@ -178,6 +197,91 @@ def groove_mask(
     mask_u8 = (mask.astype(np.uint8)) * 255
     mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
     mask_u8 = _remove_small(mask_u8, params.min_blob_px)
+    return relief_mm, mask_u8, valid
+
+
+def _apply_stroke_filters(
+    mask_u8: np.ndarray,
+    skel_u8: np.ndarray,
+    relief_mm: np.ndarray,
+    params: DepthGrooveParams,
+    mm_per_px: float | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Reject connected grooves that don't look hand-raked, keeping mask + skeleton
+    consistent. Per connected component we measure:
+      - mean depth   = mean |relief| over the component  (mm)
+      - length       = its skeleton pixel count          (→ mm via mm_per_px)
+      - width        = area / length                     (→ mm via mm_per_px)
+    A component is kept only if it passes every *enabled* threshold (0 = disabled).
+    Vectorized over labels so it stays fast on a full frame.
+    """
+    need_depth = params.min_mean_depth_mm > 0
+    need_geom = mm_per_px and (
+        params.min_length_mm > 0 or params.min_width_mm > 0 or params.max_width_mm > 0
+    )
+    if not (need_depth or need_geom):
+        return mask_u8, skel_u8
+
+    n, lbl = cv2.connectedComponents((mask_u8 > 0).astype(np.uint8), 8)
+    if n <= 1:
+        return mask_u8, skel_u8
+
+    flat = lbl.ravel()
+    area = np.bincount(flat, minlength=n).astype(np.float64)              # px per component
+    depth_sum = np.bincount(flat, weights=np.abs(relief_mm).ravel(), minlength=n)
+    mean_depth = depth_sum / np.maximum(area, 1.0)                        # mm
+    skel_mask = skel_u8 > 0
+    skel_len = np.bincount(lbl[skel_mask].ravel(), minlength=n).astype(np.float64)  # px
+    width_px = area / np.maximum(skel_len, 1.0)
+
+    keep = np.ones(n, dtype=bool)
+    keep[0] = False  # background
+    if need_depth:
+        keep &= mean_depth >= params.min_mean_depth_mm
+    if need_geom:
+        length_mm = skel_len * mm_per_px
+        width_mm = width_px * mm_per_px
+        if params.min_length_mm > 0:
+            keep &= length_mm >= params.min_length_mm
+        if params.min_width_mm > 0:
+            keep &= width_mm >= params.min_width_mm
+        if params.max_width_mm > 0:
+            keep &= width_mm <= params.max_width_mm
+
+    keep_pix = keep[lbl]
+    mask_f = np.where(keep_pix, np.uint8(255), np.uint8(0))
+    skel_f = np.where(keep_pix & skel_mask, np.uint8(255), np.uint8(0))
+    return mask_f, skel_f
+
+
+def grooves_and_mask(
+    depth_m: np.ndarray,
+    valid: np.ndarray | None = None,
+    params: DepthGrooveParams = DepthGrooveParams(),
+    reference: np.ndarray | None = None,
+    mm_per_px: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Return (thick mask, skeleton), both after natural-groove rejection. The mask
+    is computed once and thinned, so both views share one detrend pass. Pass
+    ``reference`` (a baseline depth frame, same shape) for background subtraction
+    and ``mm_per_px`` to enable the mm-based width/length filters.
+    """
+    relief_mm, base, _valid = _relief_and_base_mask(depth_m, valid, params, reference)
+    skel = _skeletonize(base)
+    return _apply_stroke_filters(base, skel, relief_mm, params, mm_per_px)
+
+
+def groove_mask(
+    depth_m: np.ndarray,
+    valid: np.ndarray | None = None,
+    params: DepthGrooveParams = DepthGrooveParams(),
+    reference: np.ndarray | None = None,
+    mm_per_px: float | None = None,
+) -> np.ndarray:
+    """The thick (cleaned, filtered) groove mask — the 'detected region' view."""
+    mask_u8, _skel = grooves_and_mask(depth_m, valid, params, reference, mm_per_px)
     return mask_u8
 
 
@@ -186,25 +290,15 @@ def grooves_from_depth(
     valid: np.ndarray | None = None,
     params: DepthGrooveParams = DepthGrooveParams(),
     skeleton: bool = True,
+    reference: np.ndarray | None = None,
+    mm_per_px: float | None = None,
 ) -> np.ndarray:
     """
-    Convenience wrapper. ``skeleton=True`` thins the mask to 1-px centrelines
-    (the path source); ``skeleton=False`` returns the thick mask. ready for
-    path_extractor.extract_from_edges().
+    Convenience wrapper. ``skeleton=True`` returns the 1-px centrelines (the path
+    source); ``skeleton=False`` returns the thick mask. Both are post-filter.
     """
-    mask_u8 = groove_mask(depth_m, valid, params)
-    return _skeletonize(mask_u8) if skeleton else mask_u8
-
-
-def grooves_and_mask(
-    depth_m: np.ndarray,
-    valid: np.ndarray | None = None,
-    params: DepthGrooveParams = DepthGrooveParams(),
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return (thick mask, skeleton). The mask is computed once and thinned, so
-    both views are available without re-running the detrend pipeline twice."""
-    mask_u8 = groove_mask(depth_m, valid, params)
-    return mask_u8, _skeletonize(mask_u8)
+    mask_u8, skel = grooves_and_mask(depth_m, valid, params, reference, mm_per_px)
+    return skel if skeleton else mask_u8
 
 
 # ── Depth → colour for display ────────────────────────────────────────────────
@@ -254,12 +348,17 @@ def process_depth(
     valid: np.ndarray | None,
     crop: Crop,
     params: DepthGrooveParams,
+    reference: np.ndarray | None = None,
+    mm_per_px: float | None = None,
 ) -> ProcessedDepth:
     """
     Colorize the FULL depth frame (so the crop box overlays the same image the
-    user sees), then run groove detection on the cropped depth. Returns the full
-    colorized view, the cropped groove centrelines + thick mask, and the crop's
-    pixel origin so extracted strokes can be shifted back into full-frame coords.
+    user sees), then run groove detection on the cropped depth. ``reference`` (a
+    baseline depth frame, full size) is cropped the same way for background
+    subtraction; ``mm_per_px`` enables the mm-based width/length filters. Returns
+    the full colorized view, the cropped groove centrelines + thick mask, and the
+    crop's pixel origin so extracted strokes can be shifted back into full-frame
+    coords.
     """
     d = np.asarray(depth_m, dtype=np.float32)
     if valid is None:
@@ -271,7 +370,8 @@ def process_depth(
     x0, y0, x1, y1 = crop.pixel_box(w, h)
     sub_d = d[y0:y1, x0:x1]
     sub_v = valid[y0:y1, x0:x1]
-    mask, grooves = grooves_and_mask(sub_d, sub_v, params)
+    sub_ref = reference[y0:y1, x0:x1] if reference is not None else None
+    mask, grooves = grooves_and_mask(sub_d, sub_v, params, sub_ref, mm_per_px)
 
     return ProcessedDepth(color_full=color_full, grooves=grooves, mask=mask, origin=(x0, y0))
 

@@ -274,6 +274,7 @@ main {
   cursor: pointer;
 }
 .adj-btn { width: 100%; font-size: 11px; padding: 4px; }
+.adj-btn.active { border-color: #00e5a0; color: #00e5a0; }
 
 #detect-mode {
   flex: 1;

@@ -99,6 +99,43 @@
       <p class="adj-note">Discards detected specks smaller than this many pixels before
         thinning — clears isolated noise that isn't part of a real groove.</p>
 
+      <div class="adj-group-title">Reject natural grooves</div>
+      <p class="adj-note">Tools to suppress pre-existing/natural sand grooves and keep only the
+        deliberate hand-raked ones. Each is independent — set any slider to 0 to disable it
+        (so you can compare the difference it makes).</p>
+
+      <div class="adj-row">
+        <button id="btn-set-reference" class="adj-btn">Set Reference (empty sand)</button>
+      </div>
+      <div class="adj-row">
+        <button id="btn-clear-reference" class="adj-btn">Clear Reference</button>
+      </div>
+      <div class="adj-row" data-key="ref_strength" data-min="0" data-max="1" data-step="0.05" data-default="0">
+        <label>Reference subtract</label><input type="range" /><span class="adj-val"></span></div>
+      <p class="adj-note"><b>Background subtraction.</b> Capture the undrawn sand with
+        <i>Set Reference</i>, then raise this to subtract that baseline — pre-existing natural
+        grooves appear in both frames and cancel, leaving only what you drew. 0 = off, 1 = full.
+        (Camera and sandbox must stay still between reference and capture.)</p>
+
+      <div class="adj-row" data-key="min_mean_depth_mm" data-min="0" data-max="10" data-step="0.1" data-default="0">
+        <label>Min mean depth (mm)</label><input type="range" /><span class="adj-val"></span></div>
+      <p class="adj-note">Drops whole grooves whose <i>average</i> depth is shallower than this.
+        Hand-raked grooves are consistently a few mm deep; faint natural ripples that only
+        graze the threshold get rejected. 0 = off.</p>
+
+      <div class="adj-row" data-key="min_width_mm" data-min="0" data-max="30" data-step="0.5" data-default="0">
+        <label>Min width (mm)</label><input type="range" /><span class="adj-val"></span></div>
+      <div class="adj-row" data-key="max_width_mm" data-min="0" data-max="30" data-step="0.5" data-default="0">
+        <label>Max width (mm)</label><input type="range" /><span class="adj-val"></span></div>
+      <p class="adj-note">Keep only grooves whose width matches the raking tool. A hand rake
+        makes a consistent width; thin natural scratches or broad dishes fall outside the band.
+        0 = off (max 0 = no upper limit). Needs a workspace for the mm scale.</p>
+
+      <div class="adj-row" data-key="min_length_mm" data-min="0" data-max="200" data-step="1" data-default="0">
+        <label>Min length (mm)</label><input type="range" /><span class="adj-val"></span></div>
+      <p class="adj-note">Drops grooves shorter than this along their centreline — natural texture
+        tends to break into short fragments. 0 = off. Needs a workspace for the mm scale.</p>
+
       <div class="adj-group-title">Band mode</div>
       <div class="adj-row" data-key="band_center_mm" data-min="-20" data-max="20" data-step="0.5" data-default="0">
         <label>Band center (mm)</label><input type="range" /><span class="adj-val"></span></div>

@@ -5,6 +5,7 @@ no RealSense hardware required.
 Also covers the no-hardware paths of DepthCameraThread (lifecycle + empty
 capture); the live RealSense streaming itself is exercised in test_integration.py.
 """
+import cv2
 import numpy as np
 import pytest
 
@@ -18,6 +19,16 @@ from depth_extractor import (
     grooves_from_depth,
     process_depth,
 )
+
+
+def _rows_with_grooves(skel):
+    """Return the set of approximate row-bands (centre y) that contain skeleton px."""
+    return np.where(skel > 0)[0]
+
+
+def _has_row(skel, y, tol=20):
+    ys = _rows_with_grooves(skel)
+    return bool(((ys > y - tol) & (ys < y + tol)).any())
 from path_extractor import extract_from_edges
 from camera_thread import DepthCameraThread
 
@@ -169,6 +180,83 @@ class TestDepthGrooveParams:
     def test_garbage_values_use_defaults(self):
         p = DepthGrooveParams.from_dict({"groove_depth_mm": "abc"})
         assert isinstance(p.groove_depth_mm, float)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Natural-groove rejection (reference subtraction + consistency/length filters)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestNaturalGrooveRejection:
+
+    def test_reference_subtraction_cancels_preexisting_groove(self):
+        # reference = natural groove at y=100; current adds a drawn groove at y=300.
+        ref = np.full((480, 640), 0.30, dtype=np.float32)
+        cv2.line(ref, (100, 100), (500, 100), 0.303, 4)
+        cur = ref.copy()
+        cv2.line(cur, (100, 300), (500, 300), 0.303, 4)
+
+        # Without reference: both grooves detected.
+        no_ref = grooves_from_depth(cur)
+        assert _has_row(no_ref, 100) and _has_row(no_ref, 300)
+
+        # With full reference subtraction: the natural (y=100) groove cancels.
+        p = DepthGrooveParams(ref_strength=1.0)
+        with_ref = grooves_from_depth(cur, params=p, reference=ref)
+        assert _has_row(with_ref, 300)            # drawn groove kept
+        assert not _has_row(with_ref, 100)        # natural groove removed
+
+    def test_min_length_drops_short_grooves(self):
+        d = np.full((480, 640), 0.30, dtype=np.float32)
+        cv2.line(d, (100, 240), (500, 240), 0.303, 4)   # long ~400 px
+        cv2.line(d, (100, 100), (140, 100), 0.303, 4)   # short ~40 px
+        mm_per_px = 0.5                                  # 40 px = 20 mm, 400 px = 200 mm
+
+        base = grooves_from_depth(d)
+        assert _has_row(base, 240) and _has_row(base, 100)
+
+        p = DepthGrooveParams(min_length_mm=50.0)        # 50 mm = 100 px
+        filt = grooves_from_depth(d, params=p, mm_per_px=mm_per_px)
+        assert _has_row(filt, 240)                        # long kept
+        assert not _has_row(filt, 100)                    # short removed
+        assert (filt > 0).sum() < (base > 0).sum()
+
+    def test_min_mean_depth_drops_shallow_grooves(self):
+        d = np.full((480, 640), 0.30, dtype=np.float32)
+        cv2.line(d, (100, 240), (500, 240), 0.308, 4)   # deep ~8 mm
+        cv2.line(d, (100, 100), (500, 100), 0.302, 4)   # shallow ~2 mm
+        p_all = DepthGrooveParams(groove_depth_mm=1.0)   # both pass per-pixel threshold
+        base = grooves_from_depth(d, params=p_all)
+        assert _has_row(base, 240) and _has_row(base, 100)
+
+        p = DepthGrooveParams(groove_depth_mm=1.0, min_mean_depth_mm=4.0)
+        filt = grooves_from_depth(d, params=p)
+        assert _has_row(filt, 240)                        # deep kept
+        assert not _has_row(filt, 100)                    # shallow removed
+
+    def test_width_band_drops_thin_grooves(self):
+        d = np.full((480, 640), 0.30, dtype=np.float32)
+        cv2.line(d, (100, 240), (500, 240), 0.303, 10)  # wide ~10 px
+        cv2.line(d, (100, 100), (500, 100), 0.303, 3)   # thin ~3 px
+        p = DepthGrooveParams(min_width_mm=3.0)          # 3 mm = 6 px at 0.5 mm/px
+        filt = grooves_from_depth(d, params=p, mm_per_px=0.5)
+        assert _has_row(filt, 240)                        # wide kept
+        assert not _has_row(filt, 100)                    # thin removed
+
+    def test_filters_off_by_default(self, depth_with_groove):
+        # No reference, no mm scale, all thresholds 0 → identical to the plain mask.
+        m1, s1 = grooves_and_mask(depth_with_groove)
+        m2 = groove_mask(depth_with_groove)
+        assert (m1 == m2).all()
+
+    def test_from_dict_parses_and_clamps_new_keys(self):
+        p = DepthGrooveParams.from_dict({
+            "ref_strength": 2.0, "min_length_mm": -5,
+            "min_width_mm": 100, "min_mean_depth_mm": 3,
+        })
+        assert p.ref_strength <= 1.0
+        assert p.min_length_mm >= 0
+        assert p.min_width_mm <= 50
+        assert p.min_mean_depth_mm == 3.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
