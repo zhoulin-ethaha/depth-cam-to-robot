@@ -171,8 +171,44 @@ main {
   display: flex;
   gap: 0;
 }
+/* Path/Order sits bottom-left so the Detect Grooves panel (top-right overlay)
+   never covers it. */
+#path-toggle {
+  position: absolute;
+  bottom: 8px; left: 8px;
+  z-index: 10;
+  display: flex;
+  gap: 0;
+}
 #view-toggle.hidden,
-#groove-toggle.hidden { display: none; }
+#groove-toggle.hidden,
+#path-toggle.hidden { display: none; }
+
+/* Path-order legend + size slider — sits just above the bottom-left toggle. */
+#path-legend {
+  position: absolute;
+  bottom: 38px; left: 8px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: #161616dd;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  font-size: 10px;
+  color: #bbb;
+}
+#path-legend.hidden { display: none; }
+.legend-dot {
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.legend-dot.start { background: #00e5a0; }
+.legend-dot.end   { background: #ff4444; }
+.legend-sep { width: 1px; height: 14px; background: #333; margin: 0 2px; }
+#order-size { width: 78px; }
 .seg {
   padding: 3px 9px;
   font-size: 10px;

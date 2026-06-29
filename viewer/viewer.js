@@ -85,41 +85,112 @@ function makeArrow(origin, dir, length, color) {
 }
 
 /* ── Path preview (set after Capture) ──────────────────────────────────── */
-let pathGroup = null;
+let pathGroup  = null;
+let orderGroup = null;
+let lastStrokes = null;
+let pathMode   = "path";   // "path" | "order"
+let orderSize  = 1.0;      // multiplier for order numbers + start/end dots
 
 function buildPathViz(strokes) {
   if (pathGroup) { scene.remove(pathGroup); pathGroup = null; }
-  if (!strokes || strokes.length === 0) return;
+  lastStrokes = strokes && strokes.length ? strokes : null;
 
-  pathGroup = new THREE.Group();
-  const drawMat   = new THREE.LineBasicMaterial({ color: 0x00e5a0 }); // green — draw
-  const travelMat = new THREE.LineBasicMaterial({ color: 0x444466 }); // gray  — travel
+  if (lastStrokes) {
+    pathGroup = new THREE.Group();
+    const drawMat   = new THREE.LineBasicMaterial({ color: 0x00e5a0 }); // green — draw
+    const travelMat = new THREE.LineBasicMaterial({ color: 0x444466 }); // gray  — travel
 
-  let prevEnd = null;
+    let prevEnd = null;
+    for (const stroke of lastStrokes) {
+      if (stroke.length === 0) continue;
 
-  for (const stroke of strokes) {
-    if (stroke.length === 0) continue;
+      // Travel segment from previous stroke end to this stroke start
+      if (prevEnd) {
+        const startPt = new THREE.Vector3(stroke[0][0], stroke[0][1], stroke[0][2]);
+        const tGeo = new THREE.BufferGeometry().setFromPoints([prevEnd, startPt]);
+        pathGroup.add(new THREE.Line(tGeo, travelMat));
+      }
 
-    // Travel segment from previous stroke end to this stroke start
-    if (prevEnd) {
-      const startPt = new THREE.Vector3(stroke[0][0], stroke[0][1], stroke[0][2]);
-      const tGeo = new THREE.BufferGeometry().setFromPoints([prevEnd, startPt]);
-      pathGroup.add(new THREE.Line(tGeo, travelMat));
+      // Draw segment
+      const pts = stroke.map(p => new THREE.Vector3(p[0], p[1], p[2]));
+      if (pts.length > 1) {
+        const dGeo = new THREE.BufferGeometry().setFromPoints(pts);
+        pathGroup.add(new THREE.Line(dGeo, drawMat));
+      }
+
+      prevEnd = new THREE.Vector3(stroke[stroke.length - 1][0],
+                                  stroke[stroke.length - 1][1],
+                                  stroke[stroke.length - 1][2]);
     }
-
-    // Draw segment
-    const pts = stroke.map(p => new THREE.Vector3(p[0], p[1], p[2]));
-    if (pts.length > 1) {
-      const dGeo = new THREE.BufferGeometry().setFromPoints(pts);
-      pathGroup.add(new THREE.Line(dGeo, drawMat));
-    }
-
-    prevEnd = new THREE.Vector3(stroke[stroke.length - 1][0],
-                                stroke[stroke.length - 1][1],
-                                stroke[stroke.length - 1][2]);
+    scene.add(pathGroup);
   }
 
-  scene.add(pathGroup);
+  buildOrderViz(lastStrokes);
+  applyPathMode();
+}
+
+/* Order overlay: a numbered label per stroke + green start / red end markers,
+   so the drawing order and each stroke's direction are visible. */
+function buildOrderViz(strokes) {
+  if (orderGroup) { scene.remove(orderGroup); orderGroup = null; }
+  if (!strokes || strokes.length === 0) return;
+
+  orderGroup = new THREE.Group();
+  const startMat = new THREE.MeshBasicMaterial({ color: 0x00e5a0 }); // green — start
+  const endMat   = new THREE.MeshBasicMaterial({ color: 0xff4444 }); // red   — end
+  const dot = new THREE.SphereGeometry(0.005 * orderSize, 12, 12);
+
+  strokes.forEach((stroke, i) => {
+    if (stroke.length === 0) return;
+    const s = stroke[0];
+    const e = stroke[stroke.length - 1];
+
+    const startDot = new THREE.Mesh(dot, startMat);
+    startDot.position.set(s[0], s[1], s[2]);
+    orderGroup.add(startDot);
+
+    const endDot = new THREE.Mesh(dot, endMat);
+    endDot.position.set(e[0], e[1], e[2]);
+    orderGroup.add(endDot);
+
+    // Number the stroke, placed just above its start point.
+    const label = makeLabelSprite(String(i + 1), 0.03 * orderSize);
+    label.position.set(s[0], s[1], s[2] + 0.012 * orderSize);
+    orderGroup.add(label);
+  });
+
+  scene.add(orderGroup);
+}
+
+function makeLabelSprite(text, scale) {
+  const size = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "rgba(10, 12, 18, 0.78)";
+  ctx.beginPath();
+  ctx.arc(size / 2, size / 2, size / 2 - 6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#00e5a0";
+  ctx.lineWidth = 6;
+  ctx.stroke();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 70px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, size / 2, size / 2 + 4);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true });
+  const sp = new THREE.Sprite(mat);
+  sp.scale.set(scale, scale, 1);
+  return sp;
+}
+
+function applyPathMode() {
+  if (orderGroup) orderGroup.visible = (pathMode === "order");
+  const legend = document.getElementById("path-legend");
+  if (legend) legend.classList.toggle("hidden", pathMode !== "order");
 }
 
 /* ── End-effector sphere ────────────────────────────────────────────────── */
@@ -629,6 +700,22 @@ grooveToggle.querySelectorAll(".seg").forEach(btn => {
       b.classList.toggle("active", b === btn));
     applyGrooveView();
   });
+});
+
+const pathToggle = document.getElementById("path-toggle");
+pathToggle.querySelectorAll(".seg").forEach(btn => {
+  btn.addEventListener("click", () => {
+    pathMode = btn.dataset.path;
+    pathToggle.querySelectorAll(".seg").forEach(b =>
+      b.classList.toggle("active", b === btn));
+    applyPathMode();
+  });
+});
+
+document.getElementById("order-size").addEventListener("input", (e) => {
+  orderSize = parseFloat(e.target.value) || 1.0;
+  buildOrderViz(lastStrokes);   // rebuild numbers + dots at the new size
+  applyPathMode();
 });
 
 /* ── Adjustment sliders ────────────────────────────────────────────────── */

@@ -18,9 +18,11 @@ _VIEWER_DIR = Path(__file__).parent / "viewer"
 
 @web.middleware
 async def _no_cache_static(request: web.Request, handler):
-    """Serve viewer assets with no-cache so code edits show up on a plain refresh."""
+    """Serve the page and viewer assets with no-cache so code edits show up on a
+    plain refresh. Covers both /static/* and the index page at '/' — otherwise a
+    stale cached index.html can reference a fresh viewer.js and break the UI."""
     resp = await handler(request)
-    if request.path.startswith(STATIC_PATH) and not resp.prepared:
+    if (request.path == "/" or request.path.startswith(STATIC_PATH)) and not resp.prepared:
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
 

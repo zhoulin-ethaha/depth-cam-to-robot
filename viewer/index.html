@@ -161,6 +161,17 @@
     <!-- Right column: Three.js path viewer -->
     <div class="panel" id="panel-3d">
       <div class="panel-label">Path Preview</div>
+      <div id="path-toggle">
+        <button class="seg active" data-path="path">Path</button>
+        <button class="seg" data-path="order">Order</button>
+      </div>
+      <div id="path-legend" class="hidden">
+        <span class="legend-dot start"></span>Start
+        <span class="legend-dot end"></span>End
+        <span class="legend-sep"></span>
+        <label for="order-size">Size</label>
+        <input type="range" id="order-size" min="0.3" max="3" step="0.1" value="1" />
+      </div>
       <canvas id="threejs-canvas"></canvas>
     </div>
 
