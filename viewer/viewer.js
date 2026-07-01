@@ -144,6 +144,7 @@ function buildOrderViz(strokes) {
     if (stroke.length === 0) return;
     const s = stroke[0];
     const e = stroke[stroke.length - 1];
+    const m = stroke[Math.floor(stroke.length / 2)];   // midpoint along the stroke
 
     const startDot = new THREE.Mesh(dot, startMat);
     startDot.position.set(s[0], s[1], s[2]);
@@ -153,9 +154,9 @@ function buildOrderViz(strokes) {
     endDot.position.set(e[0], e[1], e[2]);
     orderGroup.add(endDot);
 
-    // Number the stroke, placed just above its start point.
+    // Number the stroke, placed just above its midpoint.
     const label = makeLabelSprite(String(i + 1), 0.03 * orderSize);
-    label.position.set(s[0], s[1], s[2] + 0.012 * orderSize);
+    label.position.set(m[0], m[1], m[2] + 0.012 * orderSize);
     orderGroup.add(label);
   });
 
