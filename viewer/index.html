@@ -17,42 +17,54 @@
   </header>
 
   <main>
-    <!-- Left column: colorized depth + groove panels -->
+    <!-- Left column: 2×2 grid of viewports (Depth | RGB  /  Skeleton | Mask) -->
     <div id="camera-column">
 
-      <div class="panel" id="panel-camera-raw">
-        <div class="panel-label" id="label-raw">Depth</div>
-        <div id="view-toggle">
-          <button class="seg active" data-view="depth">Depth</button>
-          <button class="seg" data-view="rgb">RGB</button>
-        </div>
-        <img id="camera-feed-raw" src="/depth" alt="depth / colour feed" />
+      <!-- Row 1: Depth + RGB side by side -->
+      <div class="cam-row" id="row-depth">
+        <button class="swap-btn" id="swap-depth" title="Swap left/right">⇄</button>
 
-        <!-- Captured still (shown while editing) -->
-        <div id="still-container" class="hidden">
-          <img id="still-img" alt="captured still" />
+        <div class="panel vp" id="vp-depth">
+          <div class="panel-label">Depth</div>
+          <img class="cam-live" id="feed-depth" src="/depth" alt="colorized depth feed" />
+          <img class="cam-still hidden" id="still-depth" alt="captured depth still" />
+          <!-- Crop overlay lives on the Depth viewport (live feed or captured still) -->
+          <div id="crop-box" class="hidden">
+            <div class="crop-handle" data-h="nw"></div>
+            <div class="crop-handle" data-h="ne"></div>
+            <div class="crop-handle" data-h="sw"></div>
+            <div class="crop-handle" data-h="se"></div>
+          </div>
         </div>
 
-        <!-- Crop overlay — works on both the live feed and the captured still -->
-        <div id="crop-box" class="hidden">
-          <div class="crop-handle" data-h="nw"></div>
-          <div class="crop-handle" data-h="ne"></div>
-          <div class="crop-handle" data-h="sw"></div>
-          <div class="crop-handle" data-h="se"></div>
+        <div class="panel vp" id="vp-rgb">
+          <div class="panel-label">RGB</div>
+          <img class="cam-live" id="feed-rgb" src="/rgb" alt="colour feed" />
+          <img class="cam-still hidden" id="still-rgb" alt="captured colour still" />
         </div>
       </div>
 
-      <div class="panel" id="panel-camera-canny">
-        <div class="panel-label" id="label-processed">Grooves</div>
-        <div id="groove-toggle">
-          <button class="seg active" data-groove="skeleton">Skeleton</button>
-          <button class="seg" data-groove="mask">Mask</button>
+      <!-- Row 2: Skeleton + Mask side by side -->
+      <div class="cam-row" id="row-grooves">
+        <button class="swap-btn" id="swap-grooves" title="Swap left/right">⇄</button>
+
+        <div class="panel vp" id="vp-skeleton">
+          <div class="panel-label">Skeleton</div>
+          <img class="cam-live" id="feed-skeleton" src="/depth/grooves" alt="skeleton feed" />
+          <img class="cam-still hidden" id="prev-skeleton" alt="skeleton preview" />
         </div>
-        <img id="camera-feed-canny" src="/depth/grooves" alt="groove detection feed" />
-        <img id="preview-img" class="hidden" alt="grooves preview" />
+
+        <div class="panel vp" id="vp-mask">
+          <div class="panel-label">Mask</div>
+          <img class="cam-live" id="feed-mask" src="/depth/mask" alt="mask feed" />
+          <img class="cam-still hidden" id="prev-mask" alt="mask preview" />
+        </div>
       </div>
 
     </div>
+
+    <!-- Drag to resize the 4-view block vs. the path preview -->
+    <div id="col-splitter" title="Drag to resize"></div>
 
     <!-- Groove detection controls (shown while editing a captured depth still) -->
     <div id="edit-panel" class="hidden">
@@ -60,7 +72,7 @@
         <span>Detect Grooves</span>
         <button id="btn-reset-adjust" title="Reset all groove parameters">Reset</button>
       </div>
-      <p id="edit-hint">Tune until the raked grooves stand out as clean white centrelines — the right panel updates live, even before you capture. The left panel toggles Depth / RGB. Then <b>Capture Image</b>, drag a crop on the still to limit the area (the grooves and path preview then show only that region), and <b>Generate Path</b>.</p>
+      <p id="edit-hint">All four views update live, even before you capture: <b>Depth</b> / <b>RGB</b> on top, <b>Skeleton</b> / <b>Mask</b> below (⇄ swaps a row's left/right). Tune until the raked grooves read as clean white centrelines, drag a crop on the Depth view to limit the area (grooves + path preview then show only that region), then <b>Capture Image</b> → <b>Generate Path</b>.</p>
 
       <div class="adj-group-title">Detection</div>
       <div class="adj-row">

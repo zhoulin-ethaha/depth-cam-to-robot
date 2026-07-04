@@ -328,12 +328,14 @@ class Server:
 
     async def send_preview(self, ws, depth_jpg: Optional[bytes],
                            grooves_jpg: Optional[bytes],
-                           mask_jpg: Optional[bytes]) -> None:
-        """Send the edit preview: colorized depth + groove skeleton + thick mask."""
+                           mask_jpg: Optional[bytes],
+                           rgb_jpg: Optional[bytes] = None) -> None:
+        """Send the edit preview: full colorized depth + cropped RGB/skeleton/mask."""
         try:
             await ws.send_str(json.dumps({
                 "type": "preview",
                 "depth": self._data_url(depth_jpg),
+                "rgb": self._data_url(rgb_jpg),
                 "grooves": self._data_url(grooves_jpg),
                 "mask": self._data_url(mask_jpg),
             }))

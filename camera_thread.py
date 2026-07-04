@@ -150,19 +150,20 @@ class DepthCameraThread:
                 z = np.asarray(depth_frame.get_data(), dtype=np.float32) * scale  # metres
                 ok = z > 0
                 params = self._live_params
+                h, w = z.shape[:2]
+                x0, y0, x1, y1 = self._live_crop.pixel_box(w, h)
 
                 # Colorized depth (FULL frame — the crop box overlays it client-side).
                 color = colorize_depth(z, ok, params.near_m, params.far_m)
                 ok_color, color_jpg = cv2.imencode(".jpg", color, [cv2.IMWRITE_JPEG_QUALITY, 80])
 
-                # Aligned RGB — the live "rgb" view.
+                # Aligned RGB: buffer the FULL frame for Capture, but serve the
+                # live "rgb" view CROPPED so only the selected region shows.
                 rgb = np.asarray(color_frame.get_data()) if color_frame else None
-                rgb_jpg = encode_jpeg(rgb) if rgb is not None else None
+                rgb_jpg = encode_jpeg(rgb[y0:y1, x0:x1]) if rgb is not None else None
 
                 # Live groove + mask preview, restricted to the live crop (throttled).
                 if frame_i % _LIVE_GROOVE_EVERY == 0:
-                    h, w = z.shape[:2]
-                    x0, y0, x1, y1 = self._live_crop.pixel_box(w, h)
                     ref = self._reference
                     ref_sub = ref[y0:y1, x0:x1] if (ref is not None and ref.shape == z.shape) else None
                     mask, skel = grooves_and_mask(

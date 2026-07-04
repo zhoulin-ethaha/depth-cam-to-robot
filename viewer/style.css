@@ -45,7 +45,7 @@ header h1 { font-size: 14px; font-weight: 600; letter-spacing: 0.05em; color: #e
 /* ── Main layout: CSS grid ───────────────────────────────────── */
 main {
   display: grid;
-  grid-template-columns: 1fr 2fr;
+  grid-template-columns: var(--cam-w, 33%) 6px 1fr;
   grid-template-rows: 1fr 1fr;
   flex: 1;
   overflow: hidden;
@@ -57,27 +57,73 @@ main {
   grid-row: 1 / span 2;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid #2a2a2a;
 }
 
-#panel-camera-raw {
+/* Draggable divider between the 4-view block and the path preview. */
+#col-splitter {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  background: #2a2a2a;
+  cursor: col-resize;
+  z-index: 20;
+}
+#col-splitter:hover,
+#col-splitter.dragging { background: #3a6ea5; }
+
+/* ── Left column: 2×2 grid of viewports (Depth|RGB / Skeleton|Mask) ───── */
+.cam-row {
+  flex: 1;
+  display: flex;
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+}
+#row-depth { border-bottom: 1px solid #2a2a2a; }
+.cam-row.swapped { flex-direction: row-reverse; }
+
+.vp {
   flex: 1;
   position: relative;
   overflow: hidden;
-  border-bottom: 1px solid #2a2a2a;
   display: flex;
   align-items: center;
   justify-content: center;
+  min-width: 0;
 }
+.vp + .vp { border-left: 1px solid #2a2a2a; }
 
-#panel-camera-canny {
-  flex: 1;
-  position: relative;
-  overflow: hidden;
+/* Viewport images sized to the image (contain) so the crop overlay aligns to
+   the actual pixels rather than the letterboxed panel. */
+.cam-live, .cam-still {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+  background: #111;
+  user-select: none;
+  -webkit-user-drag: none;
 }
+.cam-live.hidden, .cam-still.hidden { display: none; }
+
+/* Swap the two viewports left/right — small button at the row's top-centre. */
+.swap-btn {
+  position: absolute;
+  top: 6px; left: 50%;
+  transform: translateX(-50%);
+  z-index: 11;
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 1;
+  background: #161616cc;
+  border: 1px solid #3a3a3a;
+  color: #bbb;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.swap-btn:hover { background: #2a2a2a; color: #fff; }
 
 #panel-3d {
-  grid-column: 2;
+  grid-column: 3;
   grid-row: 1 / span 2;
   position: relative;
   overflow: hidden;
@@ -94,45 +140,7 @@ main {
   z-index: 10;
 }
 
-/* Right feed fills the panel; left feed is sized to the image so the crop
-   overlay aligns to the actual pixels (not the letterboxed panel). */
-#camera-feed-canny {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  display: block;
-  background: #111;
-}
-#camera-feed-raw {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  display: block;
-  background: #111;
-  user-select: none;
-  -webkit-user-drag: none;
-}
-
-/* ── Captured still + crop overlay ───────────────────────────── */
-#still-container {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #111;
-}
-#still-container.hidden { display: none; }
-
-#still-img {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  display: block;
-  user-select: none;
-  -webkit-user-drag: none;
-}
-
+/* ── Crop overlay (lives on the Depth viewport) ──────────────── */
 #crop-box {
   position: absolute;
   border: 1px solid #5599ff;
@@ -153,24 +161,6 @@ main {
 .crop-handle[data-h="sw"] { bottom: -6px; left: -6px; cursor: nesw-resize; }
 .crop-handle[data-h="se"] { bottom: -6px; right: -6px; cursor: nwse-resize; }
 
-/* ── Processed preview panel ─────────────────────────────────── */
-#preview-img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  display: block;
-  background: #111;
-}
-#preview-img.hidden { display: none; }
-
-#view-toggle,
-#groove-toggle {
-  position: absolute;
-  top: 8px; right: 8px;
-  z-index: 10;
-  display: flex;
-  gap: 0;
-}
 /* Path/Order sits bottom-left so the Detect Grooves panel (top-right overlay)
    never covers it. */
 #path-toggle {
@@ -180,8 +170,6 @@ main {
   display: flex;
   gap: 0;
 }
-#view-toggle.hidden,
-#groove-toggle.hidden,
 #path-toggle.hidden { display: none; }
 
 /* Path-order legend + size slider — sits just above the bottom-left toggle. */

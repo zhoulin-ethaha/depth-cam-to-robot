@@ -330,7 +330,18 @@ async def on_preview_adjust(ws, params: dict) -> None:
     depth_jpg   = await loop.run_in_executor(None, encode_jpeg, processed.color_full)
     grooves_jpg = await loop.run_in_executor(None, encode_jpeg, processed.grooves)
     mask_jpg    = await loop.run_in_executor(None, encode_jpeg, processed.mask)
-    await server.send_preview(ws, depth_jpg=depth_jpg, grooves_jpg=grooves_jpg, mask_jpg=mask_jpg)
+
+    # Crop the captured RGB to the same region so the RGB view shows only the crop.
+    rgb_jpg = None
+    if _rgb is not None:
+        x0, y0 = processed.origin
+        gh, gw = processed.grooves.shape[:2]
+        rgb_crop = _rgb[y0:y0 + gh, x0:x0 + gw]
+        rgb_jpg = await loop.run_in_executor(None, encode_jpeg, rgb_crop)
+
+    await server.send_preview(
+        ws, depth_jpg=depth_jpg, grooves_jpg=grooves_jpg, mask_jpg=mask_jpg, rgb_jpg=rgb_jpg
+    )
 
 
 async def on_generate_path(ws, params: dict) -> None:
