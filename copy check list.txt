@@ -1,0 +1,30 @@
+This is a copy of a Python depth-camera→robot app (RealSense D435i + UR robot,
+aiohttp web UI) moved from another Windows PC. The source is path-portable, but
+the virtualenv and per-rig files don't survive the copy. Get it running again:
+
+1. The copied .venv is broken (a venv isn't relocatable — its baked paths point at
+   the old PC). Delete .venv and .venv-py313-bak, then recreate:
+     python -m venv .venv
+     .venv\Scripts\python.exe -m pip install -r requirements.txt
+   Use `python -m pip`, never bare pip.exe. If `python` isn't 3.11+, tell me.
+
+2. Verify every runtime dep imports in the new venv:
+     pyrealsense2, skimage, cv2, aiohttp, numpy, rtde_control
+   Report any that fail.
+
+3. Delete stale generated files: __pycache__, tests/__pycache__, .pytest_cache, *.log.
+
+4. workspace.json and settings.json (if present) hold the OLD rig's 3-point
+   calibration and robot IP. Ask me whether this PC drives the same robot/camera
+   setup: if different, delete them so I recalibrate; if same, keep them.
+
+5. Do NOT change the HTTP port or touch git — this is a straight copy, not a variant.
+   Confirm run.bat already launches via .venv\Scripts\python.exe (leave it if so).
+
+6. Verify: run `.venv\Scripts\python.exe -m pytest -q -m "not integration"` (should
+   pass). Then, if I confirm the RealSense is plugged in, launch main.py briefly and
+   confirm it prints "started RealSense ... depth+colour" and "GUI ready"; otherwise
+   note that the camera must be connected.
+
+Report a short summary of what you fixed and anything I still need to do
+(connect RealSense, set robot IP, recalibrate).
