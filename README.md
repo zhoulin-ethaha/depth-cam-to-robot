@@ -169,8 +169,8 @@ D435i is the reference setup here.
 ## Installation
 
 ```bash
-git clone <your-repo-url>
-cd depth_cam-to-robot
+git clone https://github.com/zhoulin-ethaha/depth-cam-to-robot.git
+cd depth-cam-to-robot
 python -m venv .venv
 .venv\Scripts\activate           # Windows  (macOS/Linux: source .venv/bin/activate)
 pip install -r requirements.txt
