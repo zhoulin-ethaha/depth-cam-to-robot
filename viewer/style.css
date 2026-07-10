@@ -161,6 +161,22 @@ main {
 .crop-handle[data-h="sw"] { bottom: -6px; left: -6px; cursor: nesw-resize; }
 .crop-handle[data-h="se"] { bottom: -6px; right: -6px; cursor: nwse-resize; }
 
+/* Pop the path preview out into its own window. Bottom-right, clear of the
+   Detect Grooves overlay (top-right) and the Path/Order toggle (bottom-left). */
+#btn-popout {
+  position: absolute;
+  bottom: 8px; right: 8px;
+  z-index: 10;
+  padding: 3px 9px;
+  font-size: 11px;
+  background: #161616cc;
+  border: 1px solid #3a3a3a;
+  color: #bbb;
+  border-radius: 4px;
+  cursor: pointer;
+}
+#btn-popout:hover { background: #2a2a2a; color: #fff; }
+
 /* Path/Order sits bottom-left so the Detect Grooves panel (top-right overlay)
    never covers it. */
 #path-toggle {

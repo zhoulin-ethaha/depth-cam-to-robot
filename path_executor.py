@@ -3,7 +3,22 @@ import threading
 import time
 from typing import Optional
 
+from scipy.spatial.transform import Rotation
+
 from config import DRAW_Z, TRAVEL_Z, DRAW_SPEED, TRAVEL_SPEED, TRAVEL_ACCEL, RTDE_FREQUENCY
+
+
+def _retract(pose: list[float], dist: float) -> list[float]:
+    """
+    Offset ``pose`` by ``dist`` along the tool's retreat direction (opposite the
+    tool Z / approach axis). For the classic tool-down orientation [0, π, 0]
+    this is exactly base +Z — but on a tilted or vertical target surface it pulls
+    AWAY from the surface instead of sliding along it.
+    """
+    n = -Rotation.from_rotvec(pose[3:6]).apply([0.0, 0.0, 1.0])
+    return [pose[0] + dist * n[0],
+            pose[1] + dist * n[1],
+            pose[2] + dist * n[2]] + list(pose[3:6])
 
 
 class PathExecutor:
@@ -19,14 +34,19 @@ class PathExecutor:
         self._state_lock = state_lock
         self._cancel_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._draw_z: float = DRAW_Z
 
     @property
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def start(self, strokes: list[list[list[float]]]) -> None:
+    def start(self, strokes: list[list[list[float]]], draw_z: float = DRAW_Z) -> None:
+        """``draw_z`` is the base-frame Z offset added while drawing. Planar mode
+        uses config DRAW_Z; surface mode passes 0.0 because contact depth is
+        already baked into the waypoints along the surface normal."""
         if self.running:
             return
+        self._draw_z = draw_z
         self._cancel_event.clear()
         self._thread = threading.Thread(
             target=self._run,
@@ -61,10 +81,9 @@ class PathExecutor:
                     cancelled = True
                     break
 
-                sx, sy, sz = stroke[0][0], stroke[0][1], stroke[0][2]
-
-                # Lift above current position
-                lift_pose = [cx, cy, cz + TRAVEL_Z, rx, ry, rz]
+                # Retract from the current position along the tool axis (pulls
+                # away from the surface even when it is tilted or vertical).
+                lift_pose = _retract([cx, cy, cz, rx, ry, rz], TRAVEL_Z)
                 self._robot.move_to(lift_pose, TRAVEL_SPEED, TRAVEL_ACCEL)
                 moves_done += 1
                 self._update_progress(moves_done, total_moves)
@@ -73,8 +92,9 @@ class PathExecutor:
                     cancelled = True
                     break
 
-                # Travel laterally to above stroke start
-                travel_pose = [sx, sy, sz + TRAVEL_Z] + stroke[0][3:]
+                # Travel to a point retracted off the stroke start, in the
+                # stroke's own approach orientation.
+                travel_pose = _retract(stroke[0], TRAVEL_Z)
                 self._robot.move_to(travel_pose, TRAVEL_SPEED, TRAVEL_ACCEL)
                 moves_done += 1
                 self._update_progress(moves_done, total_moves)
@@ -93,15 +113,14 @@ class PathExecutor:
                     cancelled = True
                     break
 
-                cx, cy, cz = stroke[-1][0], stroke[-1][1], stroke[-1][2] + DRAW_Z
+                cx, cy, cz = stroke[-1][0], stroke[-1][1], stroke[-1][2] + self._draw_z
                 rx, ry, rz = stroke[-1][3], stroke[-1][4], stroke[-1][5]
 
-            # Final pen-up
+            # Final pen-up — retract along the tool axis
             if self._robot.connected:
                 final_ee = self._robot.get_ee_position()
-                final_lift = [final_ee[0], final_ee[1], final_ee[2] + TRAVEL_Z,
-                              final_ee[3], final_ee[4], final_ee[5]]
-                self._robot.move_to(final_lift, TRAVEL_SPEED, TRAVEL_ACCEL)
+                self._robot.move_to(_retract(list(final_ee), TRAVEL_Z),
+                                    TRAVEL_SPEED, TRAVEL_ACCEL)
 
         except Exception as exc:
             print(f"[executor] error during path execution: {exc}")
@@ -121,13 +140,14 @@ class PathExecutor:
     def _servo_draw_stroke(self, stroke: list[list[float]]) -> None:
         """Stream a stroke via servoL at RTDE_FREQUENCY, advancing at DRAW_SPEED."""
         dt = 1.0 / RTDE_FREQUENCY
-        waypoints = [[p[0], p[1], p[2] + DRAW_Z] + p[3:] for p in stroke]
+        waypoints = [[p[0], p[1], p[2] + self._draw_z] + p[3:] for p in stroke]
 
         arcs = [0.0]
         for i in range(1, len(waypoints)):
             dx = waypoints[i][0] - waypoints[i - 1][0]
             dy = waypoints[i][1] - waypoints[i - 1][1]
-            arcs.append(arcs[-1] + math.sqrt(dx * dx + dy * dy))
+            dz = waypoints[i][2] - waypoints[i - 1][2]
+            arcs.append(arcs[-1] + math.sqrt(dx * dx + dy * dy + dz * dz))
 
         total_arc = arcs[-1]
         if total_arc < 1e-6:

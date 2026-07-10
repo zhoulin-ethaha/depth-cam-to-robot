@@ -18,6 +18,15 @@ STATIC_PATH  = "/static"
 WORKSPACE_FILE = Path("workspace.json")
 SETTINGS_FILE  = Path("settings.json")
 
+# ── Target surface (Rhino mesh export) ────────────────────────────────────────
+# STL/OBJ meshes uploaded from the browser land here. Rhino exports are usually
+# in millimetres, so files are scaled by SURFACE_UNITS_TO_M on load (set to 1.0
+# if you export in metres).
+SURFACE_DIR        = Path("surfaces")
+SURFACE_UPLOAD_URL = "/surface/upload"
+SURFACE_UNITS_TO_M = 0.001
+SURFACE_MAX_FACES  = 80000   # warn above this — browser preview gets heavy
+
 # ── Robot start position (joint angles in radians) ───────────────────────────
 START_JOINT_ANGLES = [0.0, -math.pi / 2, math.pi / 2, -math.pi / 2, -math.pi / 2, 0.0]
 START_SPEED = 0.3

@@ -15,6 +15,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 from config import (
     HTTP_HOST, HTTP_PORT, WORKSPACE_FILE, CONTOUR_MIN_PIXELS, DEPTH_WIDTH,
+    SURFACE_DIR,
 )
 from camera_thread import DepthCameraThread
 from depth_extractor import (
@@ -25,6 +26,7 @@ from path_executor import PathExecutor
 from robot_controller import RobotController
 from server import Server
 from settings import load_settings, save_settings
+from surface import SurfaceModel, SurfacePose
 from workspace import WorkspaceConfig
 
 # ── Shared state ──────────────────────────────────────────────────────────────
@@ -42,6 +44,12 @@ shared_state: dict = {
     "phase":               "idle",     # idle|previewing|editing|captured|executing|done|error
     "captured_still":      None,       # (depth_m, valid, rgb) — frozen averaged depth + colour
     "reference_depth":     None,       # baseline depth frame for background subtraction
+    "surface_model":       None,       # SurfaceModel | None — target mesh for 3D projection
+    "surface_info":        None,       # dict for the browser (name/faces/bbox)
+    "surface_pose":        SurfacePose().to_dict(),   # placement in robot base frame
+    "surface_offset_mm":   0.0,        # TCP offset along the surface normal
+    "surface_mesh_payload": None,      # local-frame vertices/faces for the 3D preview
+    "strokes_surface":     False,      # True when current strokes were surface-projected
     "still_dims":          None,       # (width, height) of the captured still
     "strokes":             [],         # robot-space strokes after Generate Path
     "executing":           False,
@@ -279,6 +287,58 @@ async def on_clear_reference(ws) -> None:
     print("Reference depth cleared.")
 
 
+# ── Target surface (3D projection) callbacks ─────────────────────────────────
+async def on_surface_upload(filename: str, blob: bytes) -> dict:
+    """Save an uploaded STL/OBJ, load it, and broadcast mesh + status to clients."""
+    SURFACE_DIR.mkdir(exist_ok=True)
+    safe_name = os.path.basename(filename)
+    path = SURFACE_DIR / safe_name
+    path.write_bytes(blob)
+
+    loop = asyncio.get_running_loop()
+    model = await loop.run_in_executor(None, SurfaceModel.load, path)
+    info = model.info()
+    mesh_payload = await loop.run_in_executor(None, model.mesh_payload)
+
+    with state_lock:
+        shared_state["surface_model"] = model
+        shared_state["surface_info"] = info
+        shared_state["surface_mesh_payload"] = mesh_payload
+        pose = shared_state["surface_pose"]
+        offset = shared_state["surface_offset_mm"]
+
+    await server.broadcast_surface_status(
+        loaded=True, info=info, pose=pose, offset_mm=offset, mesh=mesh_payload,
+        message=f"Surface loaded: {info['name']} ({info['faces']} faces, "
+                f"{info['bbox']['size'][0]}×{info['bbox']['size'][1]} m)",
+    )
+    print(f"[surface] loaded {info['name']}: {info['faces']} faces, bbox {info['bbox']['size']} m")
+    return {"info": info}
+
+
+async def on_set_surface_pose(params: dict) -> None:
+    """Update the surface placement (base frame) and TCP normal-offset."""
+    pose = SurfacePose.from_dict(params.get("pose"))
+    try:
+        offset = float(params.get("offset_mm", 0.0))
+    except (TypeError, ValueError):
+        offset = 0.0
+    offset = min(max(offset, -20.0), 100.0)
+    with state_lock:
+        shared_state["surface_pose"] = pose.to_dict()
+        shared_state["surface_offset_mm"] = offset
+
+
+async def on_clear_surface() -> None:
+    with state_lock:
+        shared_state["surface_model"] = None
+        shared_state["surface_info"] = None
+        shared_state["surface_mesh_payload"] = None
+        shared_state["strokes_surface"] = False
+    await server.broadcast_surface_status(loaded=False, message="Surface cleared.")
+    print("[surface] cleared — paths map to the flat workspace again")
+
+
 async def on_capture_image(ws) -> None:
     """Freeze a temporally averaged depth (+ colour) frame and enter editing."""
     captured = camera_thread.capture_frame()
@@ -347,12 +407,15 @@ async def on_preview_adjust(ws, params: dict) -> None:
 async def on_generate_path(ws, params: dict) -> None:
     """Run groove extraction on the cropped depth and build the 3D path preview."""
     with state_lock:
-        workspace = shared_state.get("workspace")
-        still     = shared_state.get("captured_still")
-        dims      = shared_state.get("still_dims")
-        reference = shared_state.get("reference_depth")
+        workspace     = shared_state.get("workspace")
+        still         = shared_state.get("captured_still")
+        dims          = shared_state.get("still_dims")
+        reference     = shared_state.get("reference_depth")
+        surface_model = shared_state.get("surface_model")
+        surface_pose  = SurfacePose.from_dict(shared_state.get("surface_pose"))
+        surface_offset = shared_state.get("surface_offset_mm", 0.0)
 
-    if workspace is None:
+    if workspace is None and surface_model is None:
         await server.send_capture_result(ws, False, error="No workspace configured.")
         return
     if still is None:
@@ -377,9 +440,23 @@ async def on_generate_path(ws, params: dict) -> None:
         await server.send_capture_result(ws, False, error=str(exc))
         return
 
-    robot_strokes = pixels_to_robot_coords(
-        extracted.strokes, workspace, width, height, draw_z_offset=0.0
-    )
+    if surface_model is not None:
+        # Project the 2D drawing onto the 3D surface: waypoints lie on the mesh,
+        # TCP perpendicular to it, offset applied along the surface normal.
+        try:
+            robot_strokes = await loop.run_in_executor(
+                None, surface_model.project_strokes,
+                extracted.strokes, width, height, surface_pose, surface_offset / 1000.0,
+            )
+        except Exception as exc:
+            await server.send_capture_result(ws, False, error=f"Surface projection: {exc}")
+            return
+        surface_mode = True
+    else:
+        robot_strokes = pixels_to_robot_coords(
+            extracted.strokes, workspace, width, height, draw_z_offset=0.0
+        )
+        surface_mode = False
 
     # Convert to serialisable list-of-lists for the browser's 3D preview
     strokes_data = [
@@ -389,6 +466,7 @@ async def on_generate_path(ws, params: dict) -> None:
 
     with state_lock:
         shared_state["strokes"] = robot_strokes
+        shared_state["strokes_surface"] = surface_mode
         shared_state["phase"]   = "captured" if robot_strokes else "editing"
 
     await server.send_capture_result(
@@ -415,8 +493,9 @@ async def on_retake(ws) -> None:
 
 async def on_run(ws) -> None:
     with state_lock:
-        strokes   = shared_state.get("strokes", [])
-        connected = shared_state.get("robot_connected", False)
+        strokes      = shared_state.get("strokes", [])
+        connected    = shared_state.get("robot_connected", False)
+        surface_mode = shared_state.get("strokes_surface", False)
 
     if not strokes:
         return
@@ -426,8 +505,14 @@ async def on_run(ws) -> None:
     if path_executor.running:
         return
 
-    path_executor.start(strokes)
-    print(f"[executor] starting path: {len(strokes)} strokes")
+    # Surface strokes already carry contact depth along the surface normal, so
+    # the executor must not add the planar DRAW_Z on top.
+    if surface_mode:
+        path_executor.start(strokes, draw_z=0.0)
+    else:
+        path_executor.start(strokes)
+    print(f"[executor] starting path: {len(strokes)} strokes"
+          + (" (surface mode)" if surface_mode else ""))
 
 
 async def on_cancel(ws) -> None:
@@ -459,6 +544,9 @@ server = Server(
     on_set_groove_params=on_set_groove_params,
     on_set_reference=on_set_reference,
     on_clear_reference=on_clear_reference,
+    on_surface_upload=on_surface_upload,
+    on_set_surface_pose=on_set_surface_pose,
+    on_clear_surface=on_clear_surface,
 )
 
 # Camera starts immediately so both MJPEG feeds are live from the moment you open the browser

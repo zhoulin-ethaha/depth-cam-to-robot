@@ -4,3 +4,6 @@ aiohttp>=3.9.0
 numpy>=1.26.0
 pyrealsense2>=2.54.0
 scikit-image>=0.22.0
+trimesh>=4.0.0
+rtree>=1.0.0
+scipy>=1.11.0

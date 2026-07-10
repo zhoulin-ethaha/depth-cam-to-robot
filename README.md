@@ -252,6 +252,33 @@ Click **Test Mode (no robot)** to set a synthetic workspace and exercise the
 depth → groove → path-preview pipeline without connecting a robot. Run stays gated
 on a real connection.
 
+### Drawing on a 3D surface (Rhino mesh)
+
+Instead of the flat workspace, the drawing can be projected onto a non-planar
+target surface:
+
+1. In Rhino, `Mesh` your surface and **export as STL/OBJ in millimetres**.
+2. In the **Target surface (3D)** section of the panel, **Load Surface** — the mesh
+   appears in the Path Preview at true scale in the robot base frame.
+3. Place it with the **Surface X/Y/Z + Rot X/Y/Z** sliders (live in the preview).
+4. Set the **TCP offset (mm)** — distance off the surface along the local normal
+   (0 = contact, positive = hover).
+5. **Generate Path** — strokes are projected straight down (surface-local −Z) onto
+   the mesh, Rhino-style; every waypoint gets a tool orientation **perpendicular to
+   the surface**, with minimal wrist twist between points. Rays that miss the mesh
+   split the stroke, so drawings larger than the surface fall off its edges.
+6. **Run** executes the 6-DOF path (`servoL` interpolates position *and*
+   orientation). Surface contact depth comes from the offset slider — the planar
+   `DRAW_Z` is not applied in surface mode.
+
+**Clear Surface** returns to the flat-workspace mapping. If the robot is to draw on
+a *real* physical surface, the virtual placement must match reality — position the
+mesh with the sliders to match where the object sits relative to the robot base
+(verify with the preview and a slow first run).
+
+**Pop-out preview:** the **⧉ Pop out** button opens the Path Preview in its own
+window for a bigger view; close it (or click again) to dock it back.
+
 ---
 
 ## Configuration reference

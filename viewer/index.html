@@ -168,11 +168,47 @@
       <div class="adj-row">
         <button id="btn-crop-reset" class="adj-btn">Reset Crop (full frame)</button>
       </div>
+
+      <div class="adj-group-title">Target surface (3D)</div>
+      <p class="adj-note">Project the drawing onto a non-planar surface instead of the flat
+        workspace. Mesh your Rhino surface and export <b>STL/OBJ in millimetres</b>, then load
+        it here. The drawing is shone straight down onto the surface; the TCP stays
+        perpendicular to it. With no surface loaded, paths map to the flat workspace as before.</p>
+      <div class="adj-row">
+        <input type="file" id="surface-file" accept=".stl,.obj" class="hidden" />
+        <button id="btn-surface-load" class="adj-btn">Load Surface (STL/OBJ)</button>
+      </div>
+      <div class="adj-row">
+        <button id="btn-surface-clear" class="adj-btn">Clear Surface</button>
+      </div>
+      <p class="adj-note" id="surface-status">No surface loaded.</p>
+
+      <div class="adj-row" data-skey="tx" data-min="-1.5" data-max="1.5" data-step="0.005" data-default="0.4">
+        <label>Surface X (m)</label><input type="range" /><span class="adj-val"></span></div>
+      <div class="adj-row" data-skey="ty" data-min="-1.5" data-max="1.5" data-step="0.005" data-default="0">
+        <label>Surface Y (m)</label><input type="range" /><span class="adj-val"></span></div>
+      <div class="adj-row" data-skey="tz" data-min="-1" data-max="1.5" data-step="0.005" data-default="0">
+        <label>Surface Z (m)</label><input type="range" /><span class="adj-val"></span></div>
+      <div class="adj-row" data-skey="rx" data-min="-180" data-max="180" data-step="1" data-default="0">
+        <label>Rot X (°)</label><input type="range" /><span class="adj-val"></span></div>
+      <div class="adj-row" data-skey="ry" data-min="-180" data-max="180" data-step="1" data-default="0">
+        <label>Rot Y (°)</label><input type="range" /><span class="adj-val"></span></div>
+      <div class="adj-row" data-skey="rz" data-min="-180" data-max="180" data-step="1" data-default="0">
+        <label>Rot Z (°)</label><input type="range" /><span class="adj-val"></span></div>
+      <p class="adj-note">Places the surface in the <b>robot base frame</b> — the 3D preview
+        shows it at true location and scale relative to the robot origin (axes marker).</p>
+
+      <div class="adj-row" data-skey="offset_mm" data-min="-10" data-max="50" data-step="0.5" data-default="0">
+        <label>TCP offset (mm)</label><input type="range" /><span class="adj-val"></span></div>
+      <p class="adj-note">Lifts the TCP off the surface along the local normal: 0 = contact,
+        positive = hover above, negative = plunge in. Re-run <b>Generate Path</b> after
+        changing surface settings to update the path.</p>
     </div>
 
     <!-- Right column: Three.js path viewer -->
     <div class="panel" id="panel-3d">
       <div class="panel-label">Path Preview</div>
+      <button id="btn-popout" title="Open the path preview in its own window">⧉ Pop out</button>
       <div id="path-toggle">
         <button class="seg active" data-path="path">Path</button>
         <button class="seg" data-path="order">Order</button>

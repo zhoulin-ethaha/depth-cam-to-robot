@@ -84,6 +84,47 @@ function makeArrow(origin, dir, length, color) {
   return new THREE.Line(geo, new THREE.LineBasicMaterial({ color }));
 }
 
+/* ── Target surface visualization ───────────────────────────────────────── */
+/* The mesh is sent once in its LOCAL frame; placing it (pose sliders) only
+   updates this group's transform, so dragging sliders is instant. */
+let surfaceGroup = null;
+
+function buildSurfaceViz(mesh) {
+  if (surfaceGroup) { scene.remove(surfaceGroup); surfaceGroup = null; }
+  if (!mesh || !mesh.vertices || !mesh.vertices.length) return;
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(mesh.vertices, 3));
+  geo.setIndex(mesh.faces);
+  geo.computeVertexNormals();
+
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x9a7b4f,            // sand
+    roughness: 0.95,
+    metalness: 0.0,
+    transparent: true,
+    opacity: 0.85,
+    side: THREE.DoubleSide,
+  });
+  surfaceGroup = new THREE.Group();
+  surfaceGroup.add(new THREE.Mesh(geo, mat));
+  const wire = new THREE.LineSegments(
+    new THREE.WireframeGeometry(geo),
+    new THREE.LineBasicMaterial({ color: 0x5a4a33, transparent: true, opacity: 0.25 })
+  );
+  surfaceGroup.add(wire);
+  scene.add(surfaceGroup);
+  applySurfacePose(readSurfacePose());
+}
+
+function applySurfacePose(p) {
+  if (!surfaceGroup) return;
+  const d = Math.PI / 180;
+  // 'ZYX' here matches scipy's extrinsic 'xyz' euler on the server.
+  surfaceGroup.setRotationFromEuler(new THREE.Euler(p.rx * d, p.ry * d, p.rz * d, "ZYX"));
+  surfaceGroup.position.set(p.tx, p.ty, p.tz);
+}
+
 /* ── Path preview (set after Capture) ──────────────────────────────────── */
 let pathGroup  = null;
 let orderGroup = null;
@@ -249,6 +290,8 @@ function connectWS() {
       handleCaptureResult(data);
     } else if (data.type === "reference_status") {
       handleReferenceStatus(data);
+    } else if (data.type === "surface_status") {
+      handleSurfaceStatus(data);
     } else if (data.type === "execution_update") {
       handleExecutionUpdate(data);
     }
@@ -264,6 +307,9 @@ function handleInit(data) {
   }
   if (data.workspace) {
     applyWorkspace(data.workspace);
+  }
+  if (data.surface && data.surface.loaded) {
+    handleSurfaceStatus(data.surface);
   }
 }
 
@@ -757,6 +803,94 @@ function handleReferenceStatus(data) {
   requestAdjust(true);
 }
 
+/* ── Target surface (3D projection) ─────────────────────────────────────── */
+function srfRows() { return document.querySelectorAll(".adj-row[data-skey]"); }
+
+function initSurfaceControls() {
+  srfRows().forEach(row => {
+    const input = row.querySelector("input[type=range]");
+    input.min   = row.dataset.min;
+    input.max   = row.dataset.max;
+    input.step  = row.dataset.step;
+    input.value = row.dataset.default;
+    updateAdjVal(row);
+    input.addEventListener("input", () => {
+      updateAdjVal(row);
+      applySurfacePose(readSurfacePose());   // instant client-side placement
+      sendSurfacePose();                     // debounced push to the server
+    });
+  });
+
+  document.getElementById("btn-surface-load").addEventListener("click", () =>
+    document.getElementById("surface-file").click());
+  document.getElementById("surface-file").addEventListener("change", uploadSurface);
+  document.getElementById("btn-surface-clear").addEventListener("click", () => {
+    sendWS({ type: "clear_surface" });
+  });
+}
+
+function readSurfacePose() {
+  const p = { tx: 0.4, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0, offset_mm: 0 };
+  srfRows().forEach(row => {
+    p[row.dataset.skey] = parseFloat(row.querySelector("input[type=range]").value);
+  });
+  return p;
+}
+
+let surfacePoseTimer = null;
+function sendSurfacePose() {
+  if (surfacePoseTimer) clearTimeout(surfacePoseTimer);
+  surfacePoseTimer = setTimeout(() => {
+    const p = readSurfacePose();
+    sendWS({ type: "set_surface_pose",
+             params: { pose: p, offset_mm: p.offset_mm } });
+  }, 150);
+}
+
+async function uploadSurface(e) {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  setHeaderStatus("robot", true, `Uploading ${file.name}…`);
+  const form = new FormData();
+  form.append("file", file);
+  try {
+    const res = await fetch("/surface/upload", { method: "POST", body: form });
+    const out = await res.json();
+    if (!out.ok) throw new Error(out.error || "upload failed");
+    // The server broadcasts surface_status (with the mesh) to all clients.
+  } catch (err) {
+    setHeaderStatus("robot", false, "Surface upload failed: " + err.message);
+  }
+  e.target.value = "";   // allow re-selecting the same file
+}
+
+function handleSurfaceStatus(data) {
+  const status = document.getElementById("surface-status");
+  if (data.loaded) {
+    if (data.mesh) buildSurfaceViz(data.mesh);
+    if (data.pose) setSurfaceSliders(data.pose, data.offset_mm);
+    const i = data.info || {};
+    const size = i.bbox ? `${i.bbox.size[0]}×${i.bbox.size[1]}×${i.bbox.size[2]} m` : "";
+    status.textContent = `Loaded: ${i.name || "surface"} — ${i.faces || "?"} faces, ${size}`;
+  } else {
+    if (surfaceGroup) { scene.remove(surfaceGroup); surfaceGroup = null; }
+    status.textContent = "No surface loaded.";
+  }
+  if (data.message) setHeaderStatus("robot", true, data.message);
+  applySurfacePose(readSurfacePose());
+}
+
+function setSurfaceSliders(pose, offsetMm) {
+  srfRows().forEach(row => {
+    const key = row.dataset.skey;
+    const val = key === "offset_mm" ? offsetMm : pose[key];
+    if (val === undefined || val === null) return;
+    const input = row.querySelector("input[type=range]");
+    input.value = val;
+    updateAdjVal(row);
+  });
+}
+
 /* ── Crop overlay (drag to draw / move / resize) ───────────────────────── */
 /* The overlay lives on the Depth viewport and tracks its active image (live
    feed or captured still), so a region can be cropped before *or* after capture. */
@@ -869,6 +1003,48 @@ new ResizeObserver(renderCrop).observe(vpDepth);
   });
 })();
 initAdjustControls();
+initSurfaceControls();
+
+/* ── Pop-out path preview ───────────────────────────────────────────────── */
+/* Moves the whole #panel-3d (canvas + toggles + legend) into its own browser
+   window for a bigger view. Same JS context, so the scene keeps updating. */
+let popupWin = null;
+const panelHome = panel.parentElement;   // <main>, where the panel lives normally
+
+document.getElementById("btn-popout").addEventListener("click", () => {
+  if (popupWin && !popupWin.closed) { popupWin.close(); return; }  // → popIn via unload
+  popupWin = window.open("", "pathPreview", "width=1000,height=760");
+  if (!popupWin) {
+    setHeaderStatus("robot", false, "Pop-up blocked — allow pop-ups for this site.");
+    return;
+  }
+  const d = popupWin.document;
+  d.title = "Path Preview";
+  const link = d.createElement("link");
+  link.rel = "stylesheet";
+  link.href = location.origin + "/static/style.css";
+  d.head.appendChild(link);
+  d.body.style.cssText = "margin:0;background:#0e0e0e;overflow:hidden;";
+  d.body.appendChild(panel);
+  panel.style.cssText = "position:absolute;inset:0;";
+  document.getElementById("btn-popout").textContent = "⧉ Return";
+  popupWin.addEventListener("resize", resizeRenderer);
+  popupWin.addEventListener("unload", popIn);
+  setTimeout(resizeRenderer, 50);
+});
+
+function popIn() {
+  if (panel.ownerDocument === document) return;   // already home
+  panelHome.appendChild(panel);
+  panel.style.cssText = "";                       // back to the CSS grid placement
+  document.getElementById("btn-popout").textContent = "⧉ Pop out";
+  popupWin = null;
+  setTimeout(resizeRenderer, 50);
+}
+
+window.addEventListener("beforeunload", () => {
+  if (popupWin && !popupWin.closed) popupWin.close();
+});
 
 /* ── Run / Cancel buttons ──────────────────────────────────────────────── */
 document.getElementById("btn-run").addEventListener("click", () => {

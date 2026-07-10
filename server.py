@@ -10,6 +10,7 @@ from aiohttp import web
 from config import (
     HTTP_HOST, HTTP_PORT, VIS_INTERVAL,
     DEPTH_PATH, RGB_PATH, GROOVE_PATH, MASK_PATH, WS_PATH, STATIC_PATH,
+    SURFACE_UPLOAD_URL,
 )
 from settings import load_settings
 
@@ -52,6 +53,9 @@ class Server:
         on_set_groove_params: Optional[Callable] = None,
         on_set_reference: Optional[Callable] = None,
         on_clear_reference: Optional[Callable] = None,
+        on_surface_upload: Optional[Callable] = None,
+        on_set_surface_pose: Optional[Callable] = None,
+        on_clear_surface: Optional[Callable] = None,
     ):
         self._state = shared_state
         self._lock = state_lock
@@ -75,6 +79,9 @@ class Server:
         self._on_set_groove_params = on_set_groove_params
         self._on_set_reference = on_set_reference
         self._on_clear_reference = on_clear_reference
+        self._on_surface_upload = on_surface_upload
+        self._on_set_surface_pose = on_set_surface_pose
+        self._on_clear_surface = on_clear_surface
         self._ws_clients: set[web.WebSocketResponse] = set()
         self._app = self._build_app()
 
@@ -85,6 +92,7 @@ class Server:
         app.router.add_get(RGB_PATH, self._handle_rgb)
         app.router.add_get(GROOVE_PATH, self._handle_grooves)
         app.router.add_get(MASK_PATH, self._handle_mask)
+        app.router.add_post(SURFACE_UPLOAD_URL, self._handle_surface_upload)
         app.router.add_get(WS_PATH, self._handle_ws)
         app.router.add_static(STATIC_PATH, _VIEWER_DIR, show_index=False)
         return app
@@ -133,6 +141,20 @@ class Server:
     async def _handle_mask(self, request: web.Request) -> web.StreamResponse:
         return await self._mjpeg_stream(request, "last_mask_jpg")
 
+    async def _handle_surface_upload(self, request: web.Request) -> web.Response:
+        """Receive an STL/OBJ mesh (multipart form field 'file') and load it."""
+        if not self._on_surface_upload:
+            return web.json_response({"ok": False, "error": "not supported"}, status=501)
+        try:
+            data = await request.post()
+            field = data.get("file")
+            if field is None or not getattr(field, "filename", None):
+                return web.json_response({"ok": False, "error": "no file"}, status=400)
+            result = await self._on_surface_upload(field.filename, field.file.read())
+            return web.json_response({"ok": True, **result})
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
     async def _handle_ws(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse()
         await ws.prepare(request)
@@ -155,14 +177,47 @@ class Server:
         return ws
 
     async def _send_init(self, ws, last_ip: str, ws_cfg) -> None:
+        with self._lock:
+            surface_info = self._state.get("surface_info")
+            surface_pose = self._state.get("surface_pose")
+            surface_offset = self._state.get("surface_offset_mm", 0.0)
+            surface_mesh = self._state.get("surface_mesh_payload")
         try:
             await ws.send_str(json.dumps({
                 "type": "init",
                 "last_ip": last_ip,
                 "workspace": ws_cfg.to_browser_dict() if ws_cfg is not None else None,
+                "surface": {
+                    "loaded": surface_info is not None,
+                    "info": surface_info,
+                    "pose": surface_pose,
+                    "offset_mm": surface_offset,
+                    "mesh": surface_mesh,
+                },
             }))
         except Exception:
             pass
+
+    async def broadcast_surface_status(self, loaded: bool, info=None, pose=None,
+                                       offset_mm: float = 0.0, mesh=None,
+                                       message: str = "") -> None:
+        """Tell every client the surface changed (mesh sent only when included)."""
+        msg = json.dumps({
+            "type": "surface_status",
+            "loaded": loaded,
+            "info": info,
+            "pose": pose,
+            "offset_mm": offset_mm,
+            "mesh": mesh,
+            "message": message,
+        })
+        dead = set()
+        for client in list(self._ws_clients):
+            try:
+                await client.send_str(msg)
+            except Exception:
+                dead.add(client)
+        self._ws_clients -= dead
 
     async def _handle_ws_message(self, ws, raw: str) -> None:
         try:
@@ -244,6 +299,14 @@ class Server:
         elif msg_type == "clear_reference":
             if self._on_clear_reference:
                 asyncio.create_task(self._on_clear_reference(ws))
+
+        elif msg_type == "set_surface_pose":
+            if self._on_set_surface_pose:
+                asyncio.create_task(self._on_set_surface_pose(data.get("params", {})))
+
+        elif msg_type == "clear_surface":
+            if self._on_clear_surface:
+                asyncio.create_task(self._on_clear_surface())
 
     async def _broadcast_loop(self) -> None:
         while True:

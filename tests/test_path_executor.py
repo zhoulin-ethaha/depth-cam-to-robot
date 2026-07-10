@@ -120,6 +120,29 @@ class TestMoveSequence:
         assert abs(travel_pose[1] - stroke_start[1]) < 1e-9  # y matches
         assert abs(travel_pose[2] - (stroke_start[2] + TRAVEL_Z)) < 1e-9
 
+    def test_vertical_surface_retracts_along_normal(self, mock_robot, shared_state_and_lock):
+        """
+        On a vertical target surface (tool axis horizontal), travel retracts must
+        pull AWAY from the surface along the tool axis — not slide up base +Z.
+        Rotvec [-π/2, 0, 0] points the tool at +Y, so retreat is −Y.
+        """
+        state, lock = shared_state_and_lock
+        ex = PathExecutor(mock_robot, state, lock)
+        rv = [-_PI / 2, 0.0, 0.0]
+        strokes = [[[0.1, 0.5, 0.3] + rv, [0.15, 0.5, 0.3] + rv]]
+        mock_robot.get_ee_position.return_value = [0.0, 0.4, 0.3] + rv
+        ex.start(strokes, draw_z=0.0)
+        _wait_done(ex)
+
+        lift_pose = mock_robot.move_to.call_args_list[0][0][0]
+        assert abs(lift_pose[1] - (0.4 - TRAVEL_Z)) < 1e-9   # −Y, off the surface
+        assert abs(lift_pose[2] - 0.3) < 1e-9                # not up base +Z
+
+        travel_pose = mock_robot.move_to.call_args_list[1][0][0]
+        assert abs(travel_pose[1] - (0.5 - TRAVEL_Z)) < 1e-9
+        assert abs(travel_pose[0] - 0.1) < 1e-9
+        assert abs(travel_pose[2] - 0.3) < 1e-9
+
     def test_draw_moves_apply_draw_z_offset(self, one_stroke):
         ex, robot, state, strokes = one_stroke
         ex.start(strokes)
