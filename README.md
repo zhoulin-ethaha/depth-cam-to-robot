@@ -203,48 +203,38 @@ tools without a port clash.) Closing the browser tab stops the server.
 
 ## Workflow
 
-### First time
-
 1. **Connect** — enter the robot's IP (e.g. `192.168.1.100`) and click **Connect**.
 
-2. **Workspace setup** — a setup overlay appears.
-   - Click **Activate Freedrive** — the arm goes compliant.
-   - Move the TCP to three reference points on the sandbox and **Record** each:
-     - **P0** — workspace origin (e.g. bottom-left corner)
-     - **Px** — a point along the X direction (e.g. bottom-right corner)
-     - **Py** — a point along the Y direction (e.g. top-left corner)
-   - Click **Confirm & Start** — saved to `workspace.json` for future sessions.
+2. **Load the drawing target** — an overlay prompts for the target surface: mesh
+   your Rhino surface, export it as **STL/OBJ in millimetres**, and load it. (There
+   is no manual robot calibration step — the surface's position relative to the
+   robot is set with the Surface X/Y/Z + rotation sliders and verified visually in
+   the Path Preview.)
 
-3. **Aim the RealSense** straight down so it covers the whole sandbox. The left panel
-   shows the live feed — toggle **Depth** (near = blue → far = red) / **RGB** — and the
-   right panel shows the live detection, toggleable between **Skeleton** (the 1-px
-   centrelines that become the path) and **Mask** (the thick detected region, which
-   shows groove *width* and is handy while tuning).
+3. **Aim the RealSense** straight down so it covers the whole sandbox. The four
+   viewports show **Depth** (near = blue → far = red), **RGB**, **Skeleton** (the
+   1-px centrelines that become the path) and **Mask** (the thick detected region,
+   which shows groove *width* and is handy while tuning).
 
 4. **Tune detection live** — the **Detect Grooves** panel is available *before* you
    capture. Pick a **Mode** (Valley / Ridge / Band) and adjust **Groove depth**,
-   **Surface scale**, **Denoise**, and **Min blob**; the right panel updates in real
-   time. You can also drag a **crop** rectangle directly on the live view to limit the
-   region — the Skeleton/Mask panel then shows only the cropped area.
+   **Surface scale**, **Denoise**, and **Min blob**; the groove viewports update in
+   real time. You can also drag a **crop** rectangle directly on the Depth view to
+   limit the region — RGB/Skeleton/Mask then show only the cropped area.
 
 5. **Capture Image** — freezes a temporally averaged depth (+ aligned colour) frame;
    the crop you drew carries over (adjust it on the still: drag inside to move, corners
    to resize; **Reset Crop** restores the full frame). Detection — and the generated
-   path — cover only the cropped region, while strokes stay correctly positioned in the
-   workspace. Toggle the left panel between **Depth** and **RGB**, and the right between
-   **Skeleton** and **Mask**, at any time. (Depth-view range sliders are display-only.)
+   path — cover only the cropped region. (Depth-view range sliders are display-only.)
 
-6. **Generate Path** — the 3D viewer shows the extracted path (green = pen-down,
-   grey = pen-up travel). Re-tune and regenerate freely, or **Retake** for a fresh
-   capture.
+6. **Generate Path** — the 3D viewer shows the surface and the extracted path
+   (green = pen-down, grey = pen-up travel). Re-tune and regenerate freely, or
+   **Retake** for a fresh capture.
 
-7. **Run** — the robot lifts, travels to the first stroke, and draws. A progress bar
-   tracks execution; **Cancel** stops mid-stroke.
-
-### Subsequent sessions
-
-After the first calibration, a **"Use This Workspace"** banner appears on connect.
-Click it to skip recalibration.
+7. **Run** — set **Speed** (% of max TCP speed), **Offset** (mm off the surface) and
+   **Safety** (retract distance, mm) in the preview's execution bar, then Run. The
+   blue dot tracks the live TCP. A progress bar tracks execution; **Cancel** stops
+   mid-stroke.
 
 ### Test mode (no robot)
 

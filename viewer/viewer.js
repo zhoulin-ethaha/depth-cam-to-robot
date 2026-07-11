@@ -277,11 +277,11 @@ function connectWS() {
     } else if (data.type === "state") {
       updateScene(data);
       updateFooter(data);
-      updateSetupPanel(data);
     } else if (data.type === "connection_result") {
       setHeaderStatus("robot", data.success, data.message);
-    } else if (data.type === "workspace_status") {
-      handleWorkspaceStatus(data);
+      // After a successful connect, prompt for the drawing target unless a
+      // surface is already loaded (there is no 3-point calibration anymore).
+      if (data.success && !surfaceGroup) showOverlay(true);
     } else if (data.type === "still") {
       handleStill(data);
     } else if (data.type === "preview") {
@@ -311,17 +311,6 @@ function handleInit(data) {
   if (data.surface && data.surface.loaded) {
     handleSurfaceStatus(data.surface);
   }
-}
-
-/* ── Workspace status ───────────────────────────────────────────────────── */
-function handleWorkspaceStatus(data) {
-  if (data.loaded && data.workspace) {
-    applyWorkspace(data.workspace);
-    showLoadedBanner(data.workspace);
-  } else {
-    showSetupSteps();
-  }
-  showOverlay(true);
 }
 
 function applyWorkspace(ws) {
@@ -435,83 +424,6 @@ function showOverlay(visible) {
   overlay.classList.toggle("hidden", !visible);
 }
 
-function showLoadedBanner(ws) {
-  document.getElementById("ws-loaded-banner").classList.remove("hidden");
-  document.getElementById("ws-steps").classList.add("hidden");
-  document.getElementById("ws-loaded-size").textContent =
-    `${ws.x_extent.toFixed(3)} m × ${ws.y_extent.toFixed(3)} m`;
-  const o = ws.origin;
-  document.getElementById("ws-loaded-origin").textContent =
-    `Origin (${o[0].toFixed(3)}, ${o[1].toFixed(3)}, ${o[2].toFixed(3)})`;
-}
-
-function showSetupSteps() {
-  document.getElementById("ws-loaded-banner").classList.add("hidden");
-  document.getElementById("ws-steps").classList.remove("hidden");
-  resetSetupStepUI();
-}
-
-function resetSetupStepUI() {
-  setStepEnabled("ws-step-2", false);
-  setStepEnabled("ws-step-3", false);
-  ["p0", "px", "py"].forEach(n => {
-    document.getElementById(`coords-${n}`).textContent = "not recorded";
-    document.getElementById(`coords-${n}`).classList.remove("recorded");
-  });
-  document.getElementById("btn-confirm-ws").disabled = true;
-  document.getElementById("ws-preview-size").textContent = "";
-  setFreedriveUI(false);
-}
-
-function setStepEnabled(id, enabled) {
-  document.getElementById(id).classList.toggle("disabled", !enabled);
-}
-
-function setFreedriveUI(active) {
-  document.getElementById("btn-start-freedrive").classList.toggle("hidden", active);
-  document.getElementById("btn-end-freedrive").classList.toggle("hidden", !active);
-  document.getElementById("freedrive-indicator").classList.toggle("hidden", !active);
-  setStepEnabled("ws-step-2", active);
-}
-
-/* ── Setup panel live updates ───────────────────────────────────────────── */
-function updateSetupPanel(data) {
-  if (data.freedrive && data.ee && data.ee.length >= 3) {
-    document.getElementById("tcp-x").textContent = data.ee[0].toFixed(4);
-    document.getElementById("tcp-y").textContent = data.ee[1].toFixed(4);
-    document.getElementById("tcp-z").textContent = data.ee[2].toFixed(4);
-    setFreedriveUI(true);
-  } else if (!data.freedrive) {
-    setFreedriveUI(false);
-  }
-
-  if (data.ws_points) {
-    let allRecorded = true;
-    ["p0", "px", "py"].forEach(name => {
-      const pts = data.ws_points[name];
-      const el  = document.getElementById(`coords-${name}`);
-      if (pts) {
-        el.textContent = `(${pts[0].toFixed(3)}, ${pts[1].toFixed(3)}, ${pts[2].toFixed(3)})`;
-        el.classList.add("recorded");
-      } else {
-        allRecorded = false;
-      }
-    });
-
-    if (allRecorded) {
-      setStepEnabled("ws-step-3", true);
-      document.getElementById("btn-confirm-ws").disabled = false;
-    }
-  }
-
-  if (data.workspace) {
-    const wsJson = JSON.stringify(data.workspace);
-    if (wsJson !== lastWorkspaceJson) {
-      applyWorkspace(data.workspace);
-    }
-  }
-}
-
 /* ── Header status ──────────────────────────────────────────────────────── */
 function setHeaderStatus(type, ok, message) {
   const dot   = document.getElementById("status-dot");
@@ -525,45 +437,9 @@ function setHeaderStatus(type, ok, message) {
   msg.textContent = message;
 }
 
-/* ── Workspace setup buttons ────────────────────────────────────────────── */
 function sendWS(msg) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 }
-
-document.getElementById("btn-start-freedrive").addEventListener("click", () => {
-  sendWS({ type: "start_freedrive" });
-});
-
-document.getElementById("btn-end-freedrive").addEventListener("click", () => {
-  sendWS({ type: "end_freedrive" });
-});
-
-["btn-record-p0", "btn-record-px", "btn-record-py"].forEach(id => {
-  const btn = document.getElementById(id);
-  btn.addEventListener("click", () => {
-    sendWS({ type: "record_point", name: btn.dataset.name });
-  });
-});
-
-document.getElementById("btn-use-workspace").addEventListener("click", () => {
-  sendWS({ type: "use_workspace" });
-  showOverlay(false);
-});
-
-document.getElementById("btn-confirm-ws").addEventListener("click", () => {
-  sendWS({ type: "confirm_workspace" });
-  showOverlay(false);
-});
-
-document.getElementById("btn-ws-redefine").addEventListener("click", () => {
-  sendWS({ type: "reset_workspace" });
-  lastWorkspaceJson = null;
-  stillLoaded = false;
-  buildWorkspaceViz(null);
-  buildPathViz(null);
-  showLive();
-  showSetupSteps();
-});
 
 /* ── Connection buttons ─────────────────────────────────────────────────── */
 document.getElementById("btn-connect").addEventListener("click", () => {

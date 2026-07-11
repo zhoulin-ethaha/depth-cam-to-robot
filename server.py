@@ -37,13 +37,7 @@ class Server:
         on_connect: Callable,
         on_disconnect: Callable,
         on_last_disconnect: Optional[Callable] = None,
-        on_start_freedrive: Optional[Callable] = None,
-        on_end_freedrive: Optional[Callable] = None,
-        on_record_point: Optional[Callable] = None,
-        on_confirm_workspace: Optional[Callable] = None,
-        on_reset_workspace: Optional[Callable] = None,
         on_simulate_workspace: Optional[Callable] = None,
-        on_use_workspace: Optional[Callable] = None,
         on_capture_image: Optional[Callable] = None,
         on_preview_adjust: Optional[Callable] = None,
         on_generate_path: Optional[Callable] = None,
@@ -63,13 +57,7 @@ class Server:
         self._on_connect = on_connect
         self._on_disconnect = on_disconnect
         self._on_last_disconnect = on_last_disconnect
-        self._on_start_freedrive = on_start_freedrive
-        self._on_end_freedrive = on_end_freedrive
-        self._on_record_point = on_record_point
-        self._on_confirm_workspace = on_confirm_workspace
-        self._on_reset_workspace = on_reset_workspace
         self._on_simulate_workspace = on_simulate_workspace
-        self._on_use_workspace = on_use_workspace
         self._on_capture_image = on_capture_image
         self._on_preview_adjust = on_preview_adjust
         self._on_generate_path = on_generate_path
@@ -235,31 +223,6 @@ class Server:
         elif msg_type == "disconnect":
             await self._on_disconnect(ws)
 
-        elif msg_type == "start_freedrive":
-            if self._on_start_freedrive:
-                asyncio.create_task(self._on_start_freedrive())
-
-        elif msg_type == "end_freedrive":
-            if self._on_end_freedrive:
-                asyncio.create_task(self._on_end_freedrive())
-
-        elif msg_type == "record_point":
-            name = data.get("name", "")
-            if self._on_record_point and name:
-                asyncio.create_task(self._on_record_point(name))
-
-        elif msg_type == "confirm_workspace":
-            if self._on_confirm_workspace:
-                asyncio.create_task(self._on_confirm_workspace())
-
-        elif msg_type == "reset_workspace":
-            if self._on_reset_workspace:
-                asyncio.create_task(self._on_reset_workspace())
-
-        elif msg_type == "use_workspace":
-            if self._on_use_workspace:
-                asyncio.create_task(self._on_use_workspace())
-
         elif msg_type == "simulate_workspace":
             if self._on_simulate_workspace:
                 asyncio.create_task(self._on_simulate_workspace())
@@ -357,16 +320,6 @@ class Server:
                 "type": "connection_result",
                 "success": success,
                 "message": message,
-            }))
-        except Exception:
-            pass
-
-    async def send_workspace_status(self, ws, loaded: bool, workspace=None) -> None:
-        try:
-            await ws.send_str(json.dumps({
-                "type": "workspace_status",
-                "loaded": loaded,
-                "workspace": workspace.to_browser_dict() if workspace is not None else None,
             }))
         except Exception:
             pass

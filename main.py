@@ -14,7 +14,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from config import (
-    HTTP_HOST, HTTP_PORT, WORKSPACE_FILE, CONTOUR_MIN_PIXELS,
+    HTTP_HOST, HTTP_PORT, CONTOUR_MIN_PIXELS,
     DEPTH_WIDTH, DEPTH_HEIGHT, SURFACE_DIR,
     DRAW_Z, DRAW_SPEED, TRAVEL_Z, MAX_TCP_SPEED,
 )
@@ -77,19 +77,9 @@ async def on_robot_connect(ip: str, ws) -> None:
 
         save_settings({"last_ip": ip})
 
-        if WORKSPACE_FILE.exists():
-            try:
-                ws_cfg = WorkspaceConfig.load(WORKSPACE_FILE)
-                with state_lock:
-                    shared_state["pending_workspace"] = ws_cfg
-                await server.send_workspace_status(ws, loaded=True, workspace=ws_cfg)
-            except Exception as exc:
-                print(f"Failed to load workspace.json: {exc}")
-                await server.send_workspace_status(ws, loaded=False)
-        else:
-            await server.send_workspace_status(ws, loaded=False)
-
-        await server.send_connection_result(ws, True, f"Connected to {ip}")
+        await server.send_connection_result(
+            ws, True, f"Connected to {ip} — load a 3D surface to start."
+        )
         print(f"Robot connected: {ip}")
 
     except asyncio.TimeoutError:
@@ -140,76 +130,9 @@ async def on_last_client_disconnect() -> None:
 
 
 # ── Workspace setup callbacks ─────────────────────────────────────────────────
-async def on_start_freedrive() -> None:
-    with state_lock:
-        shared_state["freedrive"] = True
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, robot.start_freedrive)
-    print("Freedrive activated")
-
-
-async def on_end_freedrive() -> None:
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, robot.end_freedrive)
-    with state_lock:
-        shared_state["freedrive"] = False
-    print("Freedrive ended")
-
-
-async def on_record_point(name: str) -> None:
-    if name not in ("p0", "px", "py"):
-        return
-    pos = robot.get_ee_position()[:3]
-    with state_lock:
-        shared_state["ws_points"][name] = pos
-    print(f"Recorded workspace point {name}: {[round(v, 4) for v in pos]}")
-
-
-async def on_confirm_workspace() -> None:
-    with state_lock:
-        pts = shared_state["ws_points"].copy()
-
-    p0, px, py = pts.get("p0"), pts.get("px"), pts.get("py")
-    if p0 is None or px is None or py is None:
-        print("Cannot confirm workspace — not all points recorded.")
-        return
-
-    try:
-        ws_cfg = WorkspaceConfig.from_points(p0, px, py)
-    except ValueError as exc:
-        print(f"Workspace geometry error: {exc}")
-        return
-
-    ws_cfg.save(WORKSPACE_FILE)
-
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, robot.end_freedrive)
-    await asyncio.sleep(0.5)
-
-    with state_lock:
-        shared_state["workspace"]  = ws_cfg
-        shared_state["freedrive"]  = False
-        shared_state["ws_points"]  = {"p0": None, "px": None, "py": None}
-        shared_state["phase"]      = "previewing"
-
-    camera_thread.start()
-    print(
-        f"Workspace confirmed: {ws_cfg.x_extent:.3f} m × {ws_cfg.y_extent:.3f} m, "
-        f"origin {[round(v, 3) for v in ws_cfg.origin]}"
-    )
-
-
-async def on_use_workspace() -> None:
-    with state_lock:
-        ws_cfg = shared_state.pop("pending_workspace", None)
-        if ws_cfg is None:
-            ws_cfg = shared_state.get("workspace")
-        shared_state["workspace"] = ws_cfg
-        shared_state["phase"]     = "previewing"
-    camera_thread.start()
-    print("Using existing workspace — camera started.")
-
-
+# The interactive 3-point (P0/Px/Py) freedrive calibration was removed: the
+# drawing target is now always a surface mesh loaded from file (or the Test
+# Mode synthetic workspace). WorkspaceConfig remains for the planar fallback.
 async def on_simulate_workspace() -> None:
     """
     Set a synthetic workspace so the depth→groove→Path-Preview pipeline can be
@@ -228,21 +151,6 @@ async def on_simulate_workspace() -> None:
         f"Simulation workspace active (no robot): "
         f"{ws_cfg.x_extent:.3f} m × {ws_cfg.y_extent:.3f} m — Capture enabled."
     )
-
-
-async def on_reset_workspace() -> None:
-    camera_thread.stop()
-    if WORKSPACE_FILE.exists():
-        WORKSPACE_FILE.unlink()
-    with state_lock:
-        shared_state["workspace"]        = None
-        shared_state["pending_workspace"] = None
-        shared_state["ws_points"]        = {"p0": None, "px": None, "py": None}
-        shared_state["phase"]            = "idle"
-        shared_state["strokes"]          = []
-        shared_state["captured_still"]   = None
-        shared_state["still_dims"]       = None
-    print("Workspace reset — setup required again.")
 
 
 # ── Capture image / Edit / Generate path callbacks ───────────────────────────
@@ -564,13 +472,7 @@ server = Server(
     on_connect=on_robot_connect,
     on_disconnect=on_robot_disconnect,
     on_last_disconnect=on_last_client_disconnect,
-    on_start_freedrive=on_start_freedrive,
-    on_end_freedrive=on_end_freedrive,
-    on_record_point=on_record_point,
-    on_confirm_workspace=on_confirm_workspace,
-    on_reset_workspace=on_reset_workspace,
     on_simulate_workspace=on_simulate_workspace,
-    on_use_workspace=on_use_workspace,
     on_capture_image=on_capture_image,
     on_preview_adjust=on_preview_adjust,
     on_generate_path=on_generate_path,

@@ -234,95 +234,20 @@
       <canvas id="threejs-canvas"></canvas>
     </div>
 
-    <!-- Workspace setup overlay -->
+    <!-- Drawing-target setup overlay (shown after connect until a surface is loaded) -->
     <div id="ws-overlay" class="hidden">
       <div id="ws-panel">
         <div id="ws-panel-header">
-          <span>Workspace Setup</span>
-          <span id="ws-instructions">Define the robot work area using 3 physical reference points.</span>
-        </div>
-
-        <div id="ws-loaded-banner" class="hidden">
-          <div id="ws-loaded-info">
-            <span id="ws-loaded-size"></span>
-            <span id="ws-loaded-origin"></span>
-          </div>
-          <div class="ws-loaded-actions">
-            <button id="btn-use-workspace">Use This Workspace</button>
-            <button id="btn-ws-redefine">Set Up New</button>
-          </div>
-        </div>
-
-        <div id="ws-steps">
-
-          <div class="ws-step" id="ws-step-1">
-            <div class="ws-step-header">
-              <span class="ws-step-num">1</span>
-              <span class="ws-step-title">Activate Freedrive</span>
-            </div>
-            <p class="ws-step-desc">
-              Robot arm becomes compliant — you can push it by hand.
-              Attach a pen to the TCP for precision.
-            </p>
-            <div class="ws-step-actions">
-              <button id="btn-start-freedrive">Activate Freedrive</button>
-              <button id="btn-end-freedrive" class="hidden">Stop Freedrive</button>
-              <span id="freedrive-indicator" class="status-badge hidden">FREEDRIVE ACTIVE</span>
-            </div>
-          </div>
-
-          <div class="ws-step disabled" id="ws-step-2">
-            <div class="ws-step-header">
-              <span class="ws-step-num">2</span>
-              <span class="ws-step-title">Record 3 Reference Points</span>
-            </div>
-            <p class="ws-step-desc">
-              Move robot to each marked spot and click Record.
-            </p>
-
-            <div id="tcp-live">
-              TCP&nbsp;
-              <span class="tcp-axis">X</span><span id="tcp-x">—</span>&nbsp;
-              <span class="tcp-axis">Y</span><span id="tcp-y">—</span>&nbsp;
-              <span class="tcp-axis">Z</span><span id="tcp-z">—</span>
-            </div>
-
-            <div class="ws-point-row">
-              <div class="ws-point-label">
-                <span class="dot dot-p0"></span>P0 — Origin
-              </div>
-              <span class="ws-point-coords" id="coords-p0">not recorded</span>
-              <button class="btn-record" id="btn-record-p0" data-name="p0">Record</button>
-            </div>
-            <div class="ws-point-row">
-              <div class="ws-point-label">
-                <span class="dot dot-px"></span>Px — +X direction &amp; extent
-              </div>
-              <span class="ws-point-coords" id="coords-px">not recorded</span>
-              <button class="btn-record" id="btn-record-px" data-name="px">Record</button>
-            </div>
-            <div class="ws-point-row">
-              <div class="ws-point-label">
-                <span class="dot dot-py"></span>Py — +Y direction
-              </div>
-              <span class="ws-point-coords" id="coords-py">not recorded</span>
-              <button class="btn-record" id="btn-record-py" data-name="py">Record</button>
-            </div>
-          </div>
-
-          <div class="ws-step disabled" id="ws-step-3">
-            <div class="ws-step-header">
-              <span class="ws-step-num">3</span>
-              <span class="ws-step-title">Confirm</span>
-            </div>
-            <div id="ws-preview-size"></div>
-            <button id="btn-confirm-ws" disabled>Confirm &amp; Start</button>
-          </div>
-
+          <span>Drawing Target</span>
+          <span id="ws-instructions">Load the target surface the robot will draw on.</span>
         </div>
 
         <div id="ws-surface-skip">
-          Drawing on a 3D surface instead of the flat table? Calibration isn't needed —
+          <p class="ws-step-desc">
+            Mesh your Rhino surface and export it as <b>STL/OBJ in millimetres</b>, then
+            load it here. Place it relative to the robot with the Surface X/Y/Z and
+            rotation sliders, and check the Path Preview before running.
+          </p>
           <button id="btn-ws-load-surface">Load 3D Surface (STL/OBJ)</button>
         </div>
       </div>
