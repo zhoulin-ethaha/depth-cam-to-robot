@@ -20,8 +20,12 @@ RealSense reports, colorizing it only for display.
 2. The depth is detrended (the smooth bare-sand surface is estimated and subtracted)
    so each groove shows up as local relief — "a few mm deeper than its surroundings."
 3. The thresholded grooves are thinned to 1-pixel centrelines and turned into an
-   ordered list of robot poses.
-4. A Universal Robots arm traces the path with smooth `servoL` streaming at 125 Hz.
+   ordered list of strokes.
+4. The strokes are **projected onto a target surface** — a mesh authored in Rhino
+   and loaded as STL/OBJ (flat, tilted, vertical, or fully non-planar) — with the
+   TCP oriented perpendicular to the surface at every waypoint.
+5. A Universal Robots arm traces the 6-DOF path with smooth `servoL` streaming at
+   125 Hz, at a user-set speed, hover offset, and safety retract distance.
 
 All interaction happens in a browser-based UI that opens automatically. No ROS, no
 offline programming.
@@ -58,15 +62,19 @@ resample_stroke()             ← uniform arc-length resampling (~10 px spacing)
 _order_strokes()              ← TSP nearest-neighbour; minimises pen-up travel
     │
     ▼
-pixels_to_robot_coords()      ← 3-point workspace calibration maps px → metres
+SurfaceModel.project_strokes()  ← ray-cast onto the target mesh (STL/OBJ);
+    │                             TCP perpendicular to the surface per waypoint
+    │                             (planar fallback: pixels_to_robot_coords)
+    ▼
+reach check                   ← flags waypoints outside the arm's envelope (red)
     │
     ▼
 PathExecutor._run()
-    ├─ moveL  lift above current position
-    ├─ moveL  travel to above stroke start
-    └─ servoL stream  (125 Hz, smoothstep ease-in/out)
+    ├─ moveL  retract along the tool axis (safety distance)
+    ├─ moveL  travel to the retracted stroke start
+    └─ servoL stream  (125 Hz, smoothstep ease-in/out, 6-DOF)
          ── repeats per stroke ──
-    └─ moveL  final pen-up
+    └─ moveL  final retract
 ```
 
 ---
@@ -147,7 +155,8 @@ independent and **disabled at 0**, so you can A/B the difference:
 - **Min / Max width** (`min_width_mm` / `max_width_mm`) — keep only grooves matching the
   raking tool's width; rejects thin scratches and broad dishes.
 - **Min length** (`min_length_mm`) — drop short grooves; natural texture breaks into
-  short fragments. (Width and length need a calibrated workspace for the mm scale.)
+  short fragments. (Width and length get their mm scale from the drawing's fit onto
+  the loaded surface, or from the Test-Mode workspace.)
 
 ---
 
@@ -183,9 +192,11 @@ pip install -r requirements.txt
 | `pyrealsense2 >= 2.54` | RealSense depth capture |
 | `opencv-python >= 4.8` | Depth filtering, colorizing, JPEG encoding |
 | `scikit-image >= 0.22` | Fast skeletonization (a pure-numpy fallback runs without it) |
-| `ur-rtde >= 1.6` | UR robot RTDE control (moveL, servoL, freedrive, TCP pose) |
+| `ur-rtde >= 1.6` | UR robot RTDE control (moveL, servoL, TCP pose) |
 | `aiohttp >= 3.9` | Async web server, MJPEG streaming, WebSocket |
 | `numpy >= 1.26` | Array operations |
+| `trimesh >= 4.0` + `rtree` | Target-surface mesh loading and ray-casting |
+| `scipy >= 1.11` | Rotations (surface-normal TCP orientations, retracts) |
 
 ---
 
@@ -228,13 +239,18 @@ tools without a port clash.) Closing the browser tab stops the server.
    path — cover only the cropped region. (Depth-view range sliders are display-only.)
 
 6. **Generate Path** — the 3D viewer shows the surface and the extracted path
-   (green = pen-down, grey = pen-up travel). Re-tune and regenerate freely, or
+   (green = pen-down, grey = pen-up travel). Waypoints outside the arm's estimated
+   reach are highlighted **red** with a header warning — move the surface closer or
+   crop smaller before running. The **Path | Order** toggle switches to a numbered
+   view (stroke order, green start / red end dots, size slider); **⧉ Pop out**
+   opens the preview in its own window. Re-tune and regenerate freely, or
    **Retake** for a fresh capture.
 
-7. **Run** — set **Speed** (% of max TCP speed), **Offset** (mm off the surface) and
+7. **Run** — set **Speed** (% of max TCP speed — governs the *entire* motion,
+   travels included), **Offset** (mm off the surface along the local normal) and
    **Safety** (retract distance, mm) in the preview's execution bar, then Run. The
-   blue dot tracks the live TCP. A progress bar tracks execution; **Cancel** stops
-   mid-stroke.
+   blue dot tracks the live TCP along the strokes. A progress bar tracks execution;
+   **Cancel** stops mid-stroke; failures show "Run failed: …" in the header.
 
 ### Test mode (no robot)
 
@@ -242,32 +258,32 @@ Click **Test Mode (no robot)** to set a synthetic workspace and exercise the
 depth → groove → path-preview pipeline without connecting a robot. Run stays gated
 on a real connection.
 
-### Drawing on a 3D surface (Rhino mesh)
+### How the drawing maps onto the surface
 
-Instead of the flat workspace, the drawing can be projected onto a non-planar
-target surface:
+1. In Rhino, `Mesh` your surface and **export as STL/OBJ in millimetres**. The mesh
+   may be modelled **flat, tilted, or vertical** — projection follows the mesh's
+   dominant (area-weighted average) face normal, and the drawing lands on the side
+   the normals point (flip them in Rhino with `Dir` if the paths appear on the back).
+2. The full camera frame (4:3) is **fitted centred** onto the surface's footprint,
+   aspect preserved — so each stroke lands at the same relative position it has in
+   the camera view, and the scale is fixed by the surface size (frame width ↦
+   fitted width). Cropping only selects which grooves exist; it doesn't move or
+   zoom the drawing.
+3. Every waypoint gets a tool orientation **perpendicular to the surface**, with
+   minimal wrist twist between points. Rays that miss the mesh split the stroke,
+   so drawings larger than the surface fall off its edges.
+4. Placement is live: the **Surface X/Y/Z + Rot X/Y/Z** sliders position the mesh
+   in the robot base frame (the axes marker in the preview is the base origin).
+   The **TCP offset (mm)** slider bakes a hover distance at Generate time; the
+   execution bar's **Offset** box adds more at Run time without regenerating.
+5. Surface contact depth comes from the offsets — the planar `DRAW_Z` is not
+   applied in surface mode. Retracts follow the tool axis, so they pull *away*
+   from tilted/vertical surfaces instead of sliding along them.
 
-1. In Rhino, `Mesh` your surface and **export as STL/OBJ in millimetres**.
-2. In the **Target surface (3D)** section of the panel, **Load Surface** — the mesh
-   appears in the Path Preview at true scale in the robot base frame.
-3. Place it with the **Surface X/Y/Z + Rot X/Y/Z** sliders (live in the preview).
-4. Set the **TCP offset (mm)** — distance off the surface along the local normal
-   (0 = contact, positive = hover).
-5. **Generate Path** — strokes are projected straight down (surface-local −Z) onto
-   the mesh, Rhino-style; every waypoint gets a tool orientation **perpendicular to
-   the surface**, with minimal wrist twist between points. Rays that miss the mesh
-   split the stroke, so drawings larger than the surface fall off its edges.
-6. **Run** executes the 6-DOF path (`servoL` interpolates position *and*
-   orientation). Surface contact depth comes from the offset slider — the planar
-   `DRAW_Z` is not applied in surface mode.
-
-**Clear Surface** returns to the flat-workspace mapping. If the robot is to draw on
-a *real* physical surface, the virtual placement must match reality — position the
-mesh with the sliders to match where the object sits relative to the robot base
-(verify with the preview and a slow first run).
-
-**Pop-out preview:** the **⧉ Pop out** button opens the Path Preview in its own
-window for a bigger view; close it (or click again) to dock it back.
+**Clear Surface** returns to the flat-workspace mapping (Test Mode). If the robot
+draws on a *real* physical surface, the virtual placement must match reality —
+set the sliders to where the object sits relative to the robot base and verify
+with the preview and a slow, offset-first run.
 
 ---
 
@@ -309,17 +325,27 @@ All parameters live in `config.py`.
 |----------|---------|-------------|
 | `RESAMPLE_SPACING_MM` | `5.0` mm | Target spacing between resampled waypoints |
 
+### Target surface
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SURFACE_DIR` | `surfaces/` | Uploaded STL/OBJ meshes are stored here |
+| `SURFACE_UNITS_TO_M` | `0.001` | File-unit scale (Rhino mm → m; set 1.0 for metres) |
+| `SURFACE_MAX_FACES` | `80000` | Warn above this — browser preview gets heavy |
+
 ### Robot motion
 
 | Variable | Default | Units | Description |
 |----------|---------|-------|-------------|
-| `DRAW_Z` | `-0.010` | m | Pen-contact Z offset below workspace surface origin |
-| `TRAVEL_Z` | `0.050` | m | Pen-up travel height above workspace surface origin |
-| `DRAW_SPEED` | `0.05` | m/s | Average drawing speed (smoothstep peak is 1.5×) |
+| `DRAW_Z` | `-0.010` | m | Planar-mode pen contact offset (not used in surface mode) |
+| `TRAVEL_Z` | `0.050` | m | Default safety retract (UI Safety box overrides per run) |
+| `DRAW_SPEED` | `0.05` | m/s | Default speed = 5% (UI Speed slider overrides per run) |
+| `MAX_TCP_SPEED` | `1.0` | m/s | 100% on the Speed slider (UR10e rated max tool speed) |
 | `DRAW_ACCEL` | `0.3` | m/s² | Drawing acceleration |
-| `TRAVEL_SPEED` | `0.15` | m/s | Pen-up travel speed |
-| `TRAVEL_ACCEL` | `0.5` | m/s² | Pen-up travel acceleration |
-| `TOOL_ORIENTATION` | `[0, π, 0]` | rad | TCP orientation (rx, ry, rz) for tool-down |
+| `TRAVEL_ACCEL` | `0.5` | m/s² | Travel/retract acceleration |
+| `TOOL_ORIENTATION` | `[0, π, 0]` | rad | Planar-mode TCP orientation (surface mode derives it per waypoint) |
+| `UR_REACH_M` | `1.30` | m | Reach-check envelope radius around the base |
+| `UR_MIN_REACH_M` | `0.18` | m | Reach-check inner cylinder around the base axis |
 
 ### RTDE servo streaming
 
@@ -345,21 +371,23 @@ All parameters live in `config.py`.
 
 ```
 depth_cam-to-robot/
-├── main.py                  # Entry point: shared state, callbacks, startup
+├── main.py                  # Entry point: shared state, callbacks, startup, TCP poller
 ├── config.py                # All configurable parameters
-├── server.py                # aiohttp server: MJPEG feeds, WebSocket, static files
-├── camera_thread.py         # DepthCameraThread: RealSense → colorized-depth + groove streams
-├── depth_extractor.py       # Depth → groove engine: colorize, detect, crop, skeletonize
-├── path_extractor.py        # Grooves → pixel chains → smooth → resample → TSP → robot coords
-├── path_executor.py         # Background thread: lift/travel/servoL per stroke, progress
-├── robot_controller.py      # Thread-safe ur-rtde wrapper (moveL, servoL, freedrive, EE pose)
-├── workspace.py             # 3-point workspace calibration; pixel ↔ robot coord mapping
+├── server.py                # aiohttp server: MJPEG feeds, WebSocket, surface upload
+├── camera_thread.py         # DepthCameraThread: RealSense → depth/RGB/skeleton/mask streams
+├── depth_extractor.py       # Depth → groove engine: colorize, detect, filter, skeletonize
+├── path_extractor.py        # Grooves → pixel chains → smooth → resample → TSP
+├── surface.py               # Target mesh: STL/OBJ load, projection, normal TCP orientations
+├── path_executor.py         # Background thread: retract/travel/servoL per stroke, progress
+├── robot_controller.py      # Thread-safe ur-rtde wrapper (moveL, servoL, EE pose)
+├── workspace.py             # Planar fallback mapping (Test Mode)
 ├── settings.py              # Persistent JSON settings (last robot IP)
 ├── conftest.py              # Pytest shared fixtures
 ├── pytest.ini               # Test configuration
 ├── requirements.txt         # Dependencies
-├── workspace.json           # Auto-generated: saved workspace calibration
 ├── settings.json            # Auto-generated: saved app settings
+├── surfaces/                # Uploaded target meshes (gitignored)
+├── tests/                   # Unit + hardware-gated integration tests
 └── viewer/
     ├── index.html           # Single-page app
     ├── viewer.js            # WebSocket client, UI handlers, Three.js 3D path preview
@@ -375,36 +403,41 @@ depth_cam-to-robot/
 
 ### Threading model
 
-Two background daemon threads run alongside the async event loop:
+Three background daemon threads run alongside the async event loop:
 
-- **`DepthCameraThread`** — continuously reads depth frames from the RealSense,
-  colorizes them and computes a (throttled) live groove preview, encodes both as
-  JPEG into `shared_state`, and buffers the recent raw metric depth so Capture can
-  return a temporally averaged frame. The MJPEG endpoints read at ~30 fps.
-- **`PathExecutor`** — runs the per-stroke lift/travel/draw sequence. Long-running
-  RTDE calls (`moveL`, `servoL`) happen here so the WebSocket broadcast loop is
-  never blocked.
+- **`DepthCameraThread`** — continuously reads depth + colour frames from the
+  RealSense, serves four live streams (colorized depth, aligned RGB, skeleton,
+  mask — the latter three cropped to the live crop box), and buffers the recent
+  raw metric depth so Capture can return a temporally averaged frame.
+- **`PathExecutor`** — runs the per-stroke retract/travel/draw sequence.
+  Long-running RTDE calls (`moveL`, `servoL`) happen here so the WebSocket
+  broadcast loop is never blocked.
+- **TCP poller** — reads the robot's actual TCP pose at 10 Hz while connected so
+  the preview's blue dot tracks the arm in real time.
 
 All cross-thread communication goes through a single `shared_state: dict` protected
 by `state_lock: threading.Lock`. The aiohttp event loop offloads blocking work via
 `loop.run_in_executor(None, fn)`.
 
-### Workspace calibration
+### Surface placement (instead of calibration)
 
-Three robot TCP positions define the drawing surface (P0 origin, Px along X, Py along
-Y). `WorkspaceConfig.from_points()` builds an orthonormal frame and extents in metres;
-pixel coordinates map linearly: `world_x = (u / frame_width) × x_extent`, expressed in
-the robot base frame by `p = origin + wx·x̂ + wy·ŷ`.
+There is no robot-side calibration: the target surface's pose in the robot base
+frame is set directly with the placement sliders and verified visually (the axes
+marker in the preview is the base origin). `SurfacePose` (translation + XYZ Euler)
+transforms projected waypoints and normals into the base frame. The planar
+`WorkspaceConfig` mapping remains as the Test-Mode fallback.
 
 ### Smooth robot motion
 
 Drawing strokes use `servoL` rather than `moveL`:
 
-- Commands stream at **125 Hz** (8 ms timesteps).
-- Position advances using **arc-length parameterisation** — constant `DRAW_SPEED`
-  regardless of waypoint density.
-- **Smoothstep ease-in/out** (`f(α) = 3α² − 2α³`) zeroes velocity at stroke start/end
-  (peaking at 1.5× `DRAW_SPEED` mid-stroke), eliminating jerk at pen-down/up.
+- Commands stream at **125 Hz** (8 ms timesteps), interpolating position *and*
+  orientation (6-DOF) between waypoints.
+- Position advances using **arc-length parameterisation** — the speed set on the
+  Speed slider holds regardless of waypoint density, and the same speed is used
+  for retract/travel moves so the whole actuation is uniform.
+- **Smoothstep ease-in/out** (`f(α) = 3α² − 2α³`) zeroes velocity at stroke
+  start/end (peaking at 1.5× mid-stroke), eliminating jerk at pen-down/up.
 
 ---
 
@@ -423,10 +456,11 @@ pytest -m integration -v
 
 | Test file | What it covers |
 |-----------|---------------|
-| `test_depth_extractor.py` | Depth → groove detection, colorize, crop/process, param parsing, thread no-hardware paths |
+| `test_depth_extractor.py` | Depth → groove detection, natural-groove filters, colorize, crop/process |
 | `test_path_extractor.py` | Chain extraction, resampling, TSP ordering, coordinate mapping |
-| `test_path_executor.py` | Stroke sequencing, servoL streaming, ease-in/out, progress, cancel |
-| `test_robot_controller.py` | RTDE port probe, connect/disconnect, motion commands, thread safety, freedrive |
+| `test_surface.py` | Mesh projection (flat/tilted/vertical), normal TCP orientations, offsets, placement, misses |
+| `test_path_executor.py` | Stroke sequencing, servoL streaming, uniform speed, tool-axis retracts, cancel |
+| `test_robot_controller.py` | RTDE port probe, connect/disconnect, motion commands, thread safety |
 | `test_integration.py` | Live RealSense feed, full depth→groove→robot pipeline (hardware-gated) |
 
 All unit tests mock hardware (robot) or use synthetic depth — no physical devices
