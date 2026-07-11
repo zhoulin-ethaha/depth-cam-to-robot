@@ -374,8 +374,12 @@ function updateScene(data) {
     eeSphere.position.set(data.ee[0], data.ee[1], data.ee[2]);
   }
 
-  eeMat.color.setHex(data.executing ? 0xff6600 : 0x4488ff);
-  eeMat.emissive.setHex(data.executing ? 0x331400 : 0x223366);
+  // Live TCP marker: bright blue + enlarged while the path is executing, so
+  // the dot visibly travels along the strokes during actuation (RTDE, 20 Hz).
+  eeMat.color.setHex(data.executing ? 0x2e9fff : 0x4488ff);
+  eeMat.emissive.setHex(data.executing ? 0x1a5acc : 0x223366);
+  const s = data.executing ? 1.5 : 1.0;
+  eeSphere.scale.set(s, s, s);
 }
 
 /* ── Footer update ──────────────────────────────────────────────────────── */
@@ -1021,9 +1025,12 @@ initSurfaceControls();
    window for a bigger view. Same JS context, so the scene keeps updating. */
 let popupWin = null;
 const panelHome = panel.parentElement;   // <main>, where the panel lives normally
+// Hold the node reference: once the panel (and this button with it) moves into
+// the popup document, document.getElementById in the MAIN window returns null.
+const btnPopout = document.getElementById("btn-popout");
 
-document.getElementById("btn-popout").addEventListener("click", () => {
-  if (popupWin && !popupWin.closed) { popupWin.close(); return; }  // → popIn via unload
+btnPopout.addEventListener("click", () => {
+  if (popupWin && !popupWin.closed) { popupWin.close(); popIn(); return; }
   popupWin = window.open("", "pathPreview", "width=1000,height=760");
   if (!popupWin) {
     setHeaderStatus("robot", false, "Pop-up blocked — allow pop-ups for this site.");
@@ -1038,9 +1045,9 @@ document.getElementById("btn-popout").addEventListener("click", () => {
   d.body.style.cssText = "margin:0;background:#0e0e0e;overflow:hidden;";
   d.body.appendChild(panel);
   panel.style.cssText = "position:absolute;inset:0;";
-  document.getElementById("btn-popout").textContent = "⧉ Return";
+  btnPopout.textContent = "⇱ Pop in";
   popupWin.addEventListener("resize", resizeRenderer);
-  popupWin.addEventListener("unload", popIn);
+  popupWin.addEventListener("pagehide", popIn);   // fires when the popup closes
   setTimeout(resizeRenderer, 50);
 });
 
@@ -1048,7 +1055,7 @@ function popIn() {
   if (panel.ownerDocument === document) return;   // already home
   panelHome.appendChild(panel);
   panel.style.cssText = "";                       // back to the CSS grid placement
-  document.getElementById("btn-popout").textContent = "⧉ Pop out";
+  btnPopout.textContent = "⧉ Pop out";
   popupWin = null;
   setTimeout(resizeRenderer, 50);
 }
@@ -1059,10 +1066,18 @@ window.addEventListener("beforeunload", () => {
 
 /* ── Run / Cancel buttons ──────────────────────────────────────────────── */
 document.getElementById("btn-run").addEventListener("click", () => {
-  sendWS({ type: "run" });
+  sendWS({ type: "run", params: {
+    speed_pct: parseFloat(document.getElementById("exec-speed").value) || 5,
+    offset_mm: parseFloat(document.getElementById("exec-offset").value) || 0,
+    safety_mm: parseFloat(document.getElementById("exec-safety").value) || 50,
+  }});
   setButtonsForPhase("executing");
   setProgress(0);
   document.getElementById("val-phase").textContent = "executing";
+});
+
+document.getElementById("exec-speed").addEventListener("input", (e) => {
+  document.getElementById("exec-speed-val").textContent = e.target.value + "%";
 });
 
 document.getElementById("btn-cancel").addEventListener("click", () => {

@@ -68,7 +68,8 @@ RESAMPLE_SPACING_MM = 5.0  # target spacing between robot waypoints in mm
 # ── Robot drawing ─────────────────────────────────────────────────────────────
 DRAW_Z           = -0.010  # m — pen contact (negative = below workspace surface origin)
 TRAVEL_Z         =  0.050  # m — pen-up travel height above workspace surface origin
-DRAW_SPEED       = 0.05    # m/s during drawing strokes
+DRAW_SPEED       = 0.05    # m/s during drawing strokes (default; UI Speed slider overrides)
+MAX_TCP_SPEED    = 1.0     # m/s — 100% on the Speed slider (UR10e rated max tool speed)
 DRAW_ACCEL       = 0.3     # m/s²
 TRAVEL_SPEED     = 0.15    # m/s during pen-up travel moves
 TRAVEL_ACCEL     = 0.5     # m/s²

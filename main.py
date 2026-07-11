@@ -16,6 +16,7 @@ for _stream in (sys.stdout, sys.stderr):
 from config import (
     HTTP_HOST, HTTP_PORT, WORKSPACE_FILE, CONTOUR_MIN_PIXELS,
     DEPTH_WIDTH, DEPTH_HEIGHT, SURFACE_DIR,
+    DRAW_Z, DRAW_SPEED, TRAVEL_Z, MAX_TCP_SPEED,
 )
 from camera_thread import DepthCameraThread
 from depth_extractor import (
@@ -506,7 +507,7 @@ async def on_retake(ws) -> None:
     print("Retake — back to live preview")
 
 
-async def on_run(ws) -> None:
+async def on_run(ws, params: dict | None = None) -> None:
     with state_lock:
         strokes      = shared_state.get("strokes", [])
         connected    = shared_state.get("robot_connected", False)
@@ -520,13 +521,33 @@ async def on_run(ws) -> None:
     if path_executor.running:
         return
 
+    # Execution settings from the preview bar: speed as % of the robot's max
+    # TCP speed, plus run-time offset / safety retract distances in mm.
+    params = params or {}
+
+    def _num(key, default, lo, hi):
+        try:
+            return min(max(float(params.get(key, default)), lo), hi)
+        except (TypeError, ValueError):
+            return default
+
+    speed_pct = _num("speed_pct", (DRAW_SPEED / MAX_TCP_SPEED) * 100.0, 1.0, 100.0)
+    offset_mm = _num("offset_mm", 0.0, -20.0, 200.0)
+    safety_mm = _num("safety_mm", TRAVEL_Z * 1000.0, 5.0, 300.0)
+    draw_speed = (speed_pct / 100.0) * MAX_TCP_SPEED
+
     # Surface strokes already carry contact depth along the surface normal, so
     # the executor must not add the planar DRAW_Z on top.
-    if surface_mode:
-        path_executor.start(strokes, draw_z=0.0)
-    else:
-        path_executor.start(strokes)
-    print(f"[executor] starting path: {len(strokes)} strokes"
+    path_executor.start(
+        strokes,
+        draw_z=0.0 if surface_mode else DRAW_Z,
+        draw_speed=draw_speed,
+        normal_offset=offset_mm / 1000.0,
+        travel_dist=safety_mm / 1000.0,
+    )
+    print(f"[executor] starting path: {len(strokes)} strokes, "
+          f"{speed_pct:.0f}% speed ({draw_speed:.3f} m/s), "
+          f"offset {offset_mm:.1f} mm, safety {safety_mm:.0f} mm"
           + (" (surface mode)" if surface_mode else ""))
 
 

@@ -189,10 +189,11 @@ main {
 }
 #path-toggle.hidden { display: none; }
 
-/* Path-order legend + size slider — sits just above the bottom-left toggle. */
+/* Execution settings bar (always visible) + path-order legend above it. */
+#exec-bar,
 #path-legend {
   position: absolute;
-  bottom: 38px; left: 8px;
+  left: 8px;
   z-index: 10;
   display: flex;
   align-items: center;
@@ -204,7 +205,23 @@ main {
   font-size: 10px;
   color: #bbb;
 }
+#exec-bar    { bottom: 38px; }
+#path-legend { bottom: 68px; }
 #path-legend.hidden { display: none; }
+
+#exec-speed { width: 90px; }
+#exec-speed-val { min-width: 30px; color: #ddd; }
+#exec-bar input[type="number"] {
+  width: 52px;
+  background: #222;
+  border: 1px solid #333;
+  color: #d0d0d0;
+  padding: 2px 4px;
+  font-family: inherit;
+  font-size: 10px;
+  border-radius: 3px;
+  outline: none;
+}
 .legend-dot {
   width: 9px; height: 9px;
   border-radius: 50%;

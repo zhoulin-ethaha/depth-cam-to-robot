@@ -282,7 +282,7 @@ class Server:
 
         elif msg_type == "run":
             if self._on_run:
-                asyncio.create_task(self._on_run(ws))
+                asyncio.create_task(self._on_run(ws, data.get("params", {})))
 
         elif msg_type == "cancel":
             if self._on_cancel:

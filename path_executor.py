@@ -8,6 +8,14 @@ from scipy.spatial.transform import Rotation
 from config import DRAW_Z, TRAVEL_Z, DRAW_SPEED, TRAVEL_SPEED, TRAVEL_ACCEL, RTDE_FREQUENCY
 
 
+def _offset_pose(pose: list[float], dist: float) -> list[float]:
+    """Shift a waypoint by ``dist`` along its outward normal (anti tool-Z)."""
+    n = -Rotation.from_rotvec(pose[3:6]).apply([0.0, 0.0, 1.0])
+    return [pose[0] + dist * n[0],
+            pose[1] + dist * n[1],
+            pose[2] + dist * n[2]] + list(pose[3:6])
+
+
 def _retract(pose: list[float], dist: float) -> list[float]:
     """
     Offset ``pose`` by ``dist`` along the tool's retreat direction (opposite the
@@ -35,18 +43,31 @@ class PathExecutor:
         self._cancel_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._draw_z: float = DRAW_Z
+        self._draw_speed: float = DRAW_SPEED
+        self._travel_dist: float = TRAVEL_Z
 
     @property
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def start(self, strokes: list[list[list[float]]], draw_z: float = DRAW_Z) -> None:
-        """``draw_z`` is the base-frame Z offset added while drawing. Planar mode
-        uses config DRAW_Z; surface mode passes 0.0 because contact depth is
-        already baked into the waypoints along the surface normal."""
+    def start(self, strokes: list[list[list[float]]], draw_z: float = DRAW_Z,
+              draw_speed: float = DRAW_SPEED, normal_offset: float = 0.0,
+              travel_dist: float = TRAVEL_Z) -> None:
+        """
+        draw_z        base-frame Z offset while drawing. Planar mode uses config
+                      DRAW_Z; surface mode passes 0.0 (depth baked into waypoints).
+        draw_speed    m/s along the toolpath (the UI Speed slider, % of MAX_TCP_SPEED).
+        normal_offset m added at run time along each waypoint's tool axis — lifts
+                      the TCP off the surface without regenerating the path.
+        travel_dist   m retracted along the tool axis before/between/after strokes.
+        """
         if self.running:
             return
         self._draw_z = draw_z
+        self._draw_speed = max(draw_speed, 0.005)
+        self._travel_dist = max(travel_dist, 0.005)
+        if normal_offset:
+            strokes = [[_offset_pose(p, normal_offset) for p in s] for s in strokes]
         self._cancel_event.clear()
         self._thread = threading.Thread(
             target=self._run,
@@ -84,7 +105,7 @@ class PathExecutor:
 
                 # Retract from the current position along the tool axis (pulls
                 # away from the surface even when it is tilted or vertical).
-                lift_pose = _retract([cx, cy, cz, rx, ry, rz], TRAVEL_Z)
+                lift_pose = _retract([cx, cy, cz, rx, ry, rz], self._travel_dist)
                 self._robot.move_to(lift_pose, TRAVEL_SPEED, TRAVEL_ACCEL)
                 moves_done += 1
                 self._update_progress(moves_done, total_moves)
@@ -95,7 +116,7 @@ class PathExecutor:
 
                 # Travel to a point retracted off the stroke start, in the
                 # stroke's own approach orientation.
-                travel_pose = _retract(stroke[0], TRAVEL_Z)
+                travel_pose = _retract(stroke[0], self._travel_dist)
                 self._robot.move_to(travel_pose, TRAVEL_SPEED, TRAVEL_ACCEL)
                 moves_done += 1
                 self._update_progress(moves_done, total_moves)
@@ -120,7 +141,7 @@ class PathExecutor:
             # Final pen-up — retract along the tool axis
             if self._robot.connected:
                 final_ee = self._robot.get_ee_position()
-                self._robot.move_to(_retract(list(final_ee), TRAVEL_Z),
+                self._robot.move_to(_retract(list(final_ee), self._travel_dist),
                                     TRAVEL_SPEED, TRAVEL_ACCEL)
 
         except Exception as exc:
@@ -158,7 +179,7 @@ class PathExecutor:
             self._robot.stop_servo()
             return
 
-        n_steps = max(int(total_arc / DRAW_SPEED / dt), 1)
+        n_steps = max(int(total_arc / self._draw_speed / dt), 1)
         t_start = time.perf_counter()
 
         for step in range(n_steps + 1):
