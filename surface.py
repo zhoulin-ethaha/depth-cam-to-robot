@@ -127,6 +127,18 @@ class SurfaceModel:
             },
         }
 
+    def drawing_mm_per_px(self, frame_width: int, frame_height: int) -> float:
+        """
+        Millimetres per drawing pixel once the frame is fitted onto this surface —
+        the surface-mode replacement for the workspace-derived scale (feeds the
+        mm-based groove filters).
+        """
+        lo, hi = self.mesh.bounds
+        bw, bh = float(hi[0] - lo[0]), float(hi[1] - lo[1])
+        aspect = frame_width / frame_height
+        rw = min(bw, bh * aspect)
+        return (rw / frame_width) * 1000.0
+
     def mesh_payload(self) -> dict:
         """Vertices/faces in the LOCAL frame; the browser applies the pose matrix."""
         return {

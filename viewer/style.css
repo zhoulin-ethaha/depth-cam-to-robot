@@ -161,11 +161,12 @@ main {
 .crop-handle[data-h="sw"] { bottom: -6px; left: -6px; cursor: nesw-resize; }
 .crop-handle[data-h="se"] { bottom: -6px; right: -6px; cursor: nwse-resize; }
 
-/* Pop the path preview out into its own window. Bottom-right, clear of the
-   Detect Grooves overlay (top-right) and the Path/Order toggle (bottom-left). */
+/* Pop the path preview out into its own window. Sits bottom-left next to the
+   Path/Order toggle — the right side belongs to the Detect Grooves overlay
+   (z-index 60, near full height), which would cover anything placed there. */
 #btn-popout {
   position: absolute;
-  bottom: 8px; right: 8px;
+  bottom: 8px; left: 132px;
   z-index: 10;
   padding: 3px 9px;
   font-size: 11px;
@@ -512,6 +513,21 @@ button:disabled { opacity: 0.3; cursor: not-allowed; }
 
 #btn-use-workspace { border-color: #3dcc6e44; }
 #btn-use-workspace:hover { background: #1e3a2a; color: #3dcc6e; }
+
+/* Skip-calibration footer: load a 3D target surface instead of P0/Px/Py. */
+#ws-surface-skip {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #2a2a2a;
+  font-size: 11px;
+  color: #888;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+#btn-ws-load-surface { border-color: #f0a04055; }
+#btn-ws-load-surface:hover { background: #3a2e1a; color: #f0a040; }
 
 #ws-loaded-info {
   display: flex;

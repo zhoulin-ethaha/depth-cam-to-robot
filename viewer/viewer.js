@@ -823,6 +823,10 @@ function initSurfaceControls() {
 
   document.getElementById("btn-surface-load").addEventListener("click", () =>
     document.getElementById("surface-file").click());
+  // Same file input, reachable from the workspace-setup overlay: loading a
+  // surface replaces the flat-workspace calibration entirely.
+  document.getElementById("btn-ws-load-surface").addEventListener("click", () =>
+    document.getElementById("surface-file").click());
   document.getElementById("surface-file").addEventListener("change", uploadSurface);
   document.getElementById("btn-surface-clear").addEventListener("click", () => {
     sendWS({ type: "clear_surface" });
@@ -872,6 +876,7 @@ function handleSurfaceStatus(data) {
     const i = data.info || {};
     const size = i.bbox ? `${i.bbox.size[0]}×${i.bbox.size[1]}×${i.bbox.size[2]} m` : "";
     status.textContent = `Loaded: ${i.name || "surface"} — ${i.faces || "?"} faces, ${size}`;
+    showOverlay(false);   // surface replaces the P0/Px/Py calibration
   } else {
     if (surfaceGroup) { scene.remove(surfaceGroup); surfaceGroup = null; }
     status.textContent = "No surface loaded.";

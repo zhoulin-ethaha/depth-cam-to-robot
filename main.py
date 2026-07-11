@@ -14,8 +14,8 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from config import (
-    HTTP_HOST, HTTP_PORT, WORKSPACE_FILE, CONTOUR_MIN_PIXELS, DEPTH_WIDTH,
-    SURFACE_DIR,
+    HTTP_HOST, HTTP_PORT, WORKSPACE_FILE, CONTOUR_MIN_PIXELS,
+    DEPTH_WIDTH, DEPTH_HEIGHT, SURFACE_DIR,
 )
 from camera_thread import DepthCameraThread
 from depth_extractor import (
@@ -245,11 +245,17 @@ async def on_reset_workspace() -> None:
 
 
 # ── Capture image / Edit / Generate path callbacks ───────────────────────────
-def _mm_per_px(workspace) -> float | None:
-    """Millimetres per depth pixel from the workspace calibration (for mm filters)."""
-    if workspace is None:
-        return None
-    return (workspace.x_extent / DEPTH_WIDTH) * 1000.0
+def _mm_per_px(workspace, surface_model=None) -> float | None:
+    """
+    Millimetres per depth pixel for the mm-based groove filters. Planar mode
+    derives it from the workspace calibration; surface mode from the drawing's
+    fit onto the mesh — so neither strictly requires the other.
+    """
+    if workspace is not None:
+        return (workspace.x_extent / DEPTH_WIDTH) * 1000.0
+    if surface_model is not None:
+        return surface_model.drawing_mm_per_px(DEPTH_WIDTH, DEPTH_HEIGHT)
+    return None
 
 
 async def on_set_groove_params(params: dict) -> None:
@@ -260,9 +266,10 @@ async def on_set_groove_params(params: dict) -> None:
     crop = Crop.from_dict(params.get("crop"))
     with state_lock:
         workspace = shared_state.get("workspace")
+        surface_model = shared_state.get("surface_model")
     camera_thread.set_live_params(gp)
     camera_thread.set_live_crop(crop)
-    camera_thread.set_scale(_mm_per_px(workspace))
+    camera_thread.set_scale(_mm_per_px(workspace, surface_model))
 
 
 async def on_set_reference(ws) -> None:
@@ -306,6 +313,13 @@ async def on_surface_upload(filename: str, blob: bytes) -> dict:
         shared_state["surface_mesh_payload"] = mesh_payload
         pose = shared_state["surface_pose"]
         offset = shared_state["surface_offset_mm"]
+        # A surface replaces the flat workspace for mapping, so it also unlocks
+        # the capture flow — no P0/Px/Py calibration needed in surface mode.
+        if shared_state["phase"] == "idle":
+            shared_state["phase"] = "previewing"
+
+    if not camera_thread.running:
+        camera_thread.start()
 
     await server.broadcast_surface_status(
         loaded=True, info=info, pose=pose, offset_mm=offset, mesh=mesh_payload,
@@ -372,11 +386,12 @@ async def on_preview_adjust(ws, params: dict) -> None:
     with state_lock:
         reference = shared_state.get("reference_depth")
         workspace = shared_state.get("workspace")
+        surface_model = shared_state.get("surface_model")
 
     depth_m, valid, _rgb = still
     crop   = Crop.from_dict(params.get("crop"))
     gp     = DepthGrooveParams.from_dict(params.get("adjustments"))
-    mmpp   = _mm_per_px(workspace)
+    mmpp   = _mm_per_px(workspace, surface_model)
 
     loop = asyncio.get_running_loop()
     try:
@@ -426,7 +441,7 @@ async def on_generate_path(ws, params: dict) -> None:
     width, height  = dims
     crop = Crop.from_dict(params.get("crop"))
     gp   = DepthGrooveParams.from_dict(params.get("adjustments"))
-    mmpp = _mm_per_px(workspace)
+    mmpp = _mm_per_px(workspace, surface_model)
 
     loop = asyncio.get_running_loop()
     try:
