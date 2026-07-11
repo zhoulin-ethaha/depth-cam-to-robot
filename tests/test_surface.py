@@ -33,6 +33,16 @@ def _half_plane():
     return SurfaceModel(trimesh.Trimesh(vertices=v, faces=f, process=False), "half")
 
 
+def _vertical_plane():
+    """
+    Plane modelled VERTICAL in the file (XZ plane, 0.4 wide × 0.3 tall,
+    normals facing −Y) — as exported straight from Rhino without laying it flat.
+    """
+    v = np.array([[0, 0, 0], [0.4, 0, 0], [0.4, 0, 0.3], [0, 0, 0.3]], dtype=float)
+    f = np.array([[0, 1, 2], [0, 2, 3]])   # wound so face normals point −Y
+    return SurfaceModel(trimesh.Trimesh(vertices=v, faces=f, process=False), "vertical")
+
+
 IDENTITY = SurfacePose(tx=0, ty=0, tz=0)
 
 
@@ -132,6 +142,39 @@ class TestTiltedPlane:
         d = np.array(high[0][0][:3]) - np.array(base[0][0][:3])
         n = np.array([-1, 0, 1]) / np.sqrt(2)
         assert np.allclose(d, off * n, atol=1e-6)
+
+
+class TestVerticalInFile:
+    """A mesh exported vertical (not laid flat) must still receive the drawing —
+    projection follows the mesh's dominant normal, not a fixed local −Z."""
+
+    def test_projection_hits_the_vertical_plane(self):
+        strokes = [[(160, 240), (320, 240), (480, 240)]]
+        out = _vertical_plane().project_strokes(strokes, W, H, IDENTITY)
+        assert len(out) == 1 and len(out[0]) == 3
+        for pose in out[0]:
+            assert abs(pose[1]) < 1e-9              # points lie on the y=0 plane
+
+    def test_image_up_maps_to_plane_up(self):
+        # Top-of-image pixel → top of the vertical plane (max local Z).
+        out = _vertical_plane().project_strokes([[(320, 0), (320, 2)]], W, H, IDENTITY)
+        assert out[0][0][2] > 0.29
+
+    def test_tool_perpendicular_to_vertical_plane(self):
+        out = _vertical_plane().project_strokes([[(320, 240), (400, 240)]], W, H, IDENTITY)
+        for pose in out[0]:
+            tool_z = Rotation.from_rotvec(pose[3:]).apply([0, 0, 1])
+            assert np.allclose(tool_z, [0, 1, 0], atol=1e-6)   # approach along +Y
+
+    def test_offset_pulls_off_the_plane(self):
+        out = _vertical_plane().project_strokes([[(320, 240), (400, 240)]], W, H,
+                                                IDENTITY, offset_m=0.02)
+        for pose in out[0]:
+            assert abs(pose[1] + 0.02) < 1e-9       # 20 mm toward −Y (outward)
+
+    def test_mm_per_px_uses_true_footprint(self):
+        # 0.4 m fitted across 640 px → 0.625 mm/px.
+        assert abs(_vertical_plane().drawing_mm_per_px(W, H) - 0.625) < 1e-6
 
 
 class TestMisses:

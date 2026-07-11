@@ -14,8 +14,10 @@ Frames and conventions
       XYZ Euler in degrees) places it in the ROBOT BASE frame — editable live
       from the browser so the surface can be moved relative to the robot.
     • The 2D drawing (full camera frame, aspect W:H) is fitted centred onto the
-      mesh's local XY bounding box (aspect preserved) and projected along
-      local −Z ("shone down" onto the surface). Draw-side = local +Z.
+      surface's footprint and projected along the mesh's dominant (average)
+      face normal — so the surface may be modelled flat, tilted, or vertical in
+      the file; the draw side is wherever its normals point. "Up" in the image
+      maps as close to the mesh's local +Z as the orientation allows.
     • Tool orientation: tool Z approaches along the inward normal (−n), with
       the tool X chained point-to-point for minimal twist so the wrist doesn't
       flip mid-stroke. Orientations are UR rotation vectors.
@@ -127,14 +129,44 @@ class SurfaceModel:
             },
         }
 
+    def drawing_frame(self):
+        """
+        The projection frame, derived from the mesh itself so the surface may be
+        modelled in ANY orientation (flat, tilted, vertical): rays are cast along
+        the mesh's dominant (area-weighted average) face normal ``w``; ``u``/``v``
+        span the drawing plane, with ``v`` chosen as close to local +Z as
+        possible so "up in the image" means "up on the surface". For a flat
+        horizontal mesh this reduces to the classic u=X, v=Y, w=Z mapping.
+
+        Returns (u, v, w, u0, v0, bw, bh, w_max): unit axes, in-plane bbox
+        origin/extents, and the highest w-coordinate (ray start height).
+        """
+        areas = self.mesh.area_faces
+        n_avg = (self.mesh.face_normals * areas[:, None]).sum(axis=0)
+        n_len = np.linalg.norm(n_avg)
+        w = n_avg / n_len if n_len > 1e-9 else np.array([0.0, 0.0, 1.0])
+
+        v = np.array([0.0, 0.0, 1.0]) - w[2] * w         # local Z projected ⊥ w
+        if np.linalg.norm(v) < 1e-3:                     # horizontal surface →
+            v = np.array([0.0, 1.0, 0.0]) - w[1] * w     # …image-up = local +Y
+        v /= np.linalg.norm(v)
+        u = np.cross(v, w)                               # u × v = w (no mirroring)
+
+        pu = self.mesh.vertices @ u
+        pv = self.mesh.vertices @ v
+        pw = self.mesh.vertices @ w
+        return (u, v, w,
+                float(pu.min()), float(pv.min()),
+                float(pu.max() - pu.min()), float(pv.max() - pv.min()),
+                float(pw.max()))
+
     def drawing_mm_per_px(self, frame_width: int, frame_height: int) -> float:
         """
         Millimetres per drawing pixel once the frame is fitted onto this surface —
         the surface-mode replacement for the workspace-derived scale (feeds the
         mm-based groove filters).
         """
-        lo, hi = self.mesh.bounds
-        bw, bh = float(hi[0] - lo[0]), float(hi[1] - lo[1])
+        _u, _v, _w, _u0, _v0, bw, bh, _wm = self.drawing_frame()
         aspect = frame_width / frame_height
         rw = min(bw, bh * aspect)
         return (rw / frame_width) * 1000.0
@@ -158,37 +190,39 @@ class SurfaceModel:
         """
         Pixel strokes → 6-DOF robot poses on the surface.
 
-        Each stroke point is mapped onto the mesh's local XY bounding box
-        (centred, aspect preserved), ray-cast along local −Z onto the mesh,
-        offset along the outward normal, transformed to the robot base frame by
-        ``pose``, and given a tool orientation perpendicular to the surface.
+        Each stroke point is mapped onto the surface's footprint (centred,
+        aspect preserved), ray-cast along the mesh's dominant normal onto the
+        mesh, offset along the outward normal, transformed to the robot base
+        frame by ``pose``, and given a tool orientation perpendicular to the
+        surface.
         """
         if not strokes_px:
             return []
 
-        lo, hi = self.mesh.bounds
-        bw, bh = float(hi[0] - lo[0]), float(hi[1] - lo[1])
+        # Projection frame from the mesh's own dominant normal, so the surface
+        # may be modelled flat, tilted, or vertical in the file.
+        u, v, w, u0, v0, bw, bh, w_max = self.drawing_frame()
         if bw < 1e-9 or bh < 1e-9:
             return []
 
-        # Fit the drawing rect (aspect W:H) centred into the local XY bbox.
+        # Fit the drawing rect (aspect W:H) centred into the in-plane bbox.
         aspect = frame_width / frame_height
         rw = min(bw, bh * aspect)
         rh = rw / aspect
-        ox = float(lo[0]) + (bw - rw) / 2.0
-        oy = float(lo[1]) + (bh - rh) / 2.0
+        ou = u0 + (bw - rw) / 2.0
+        ov = v0 + (bh - rh) / 2.0
 
         # Flatten all points to batch the ray-cast (one query for everything).
         counts = [len(s) for s in strokes_px]
         pts = np.array([p for s in strokes_px for p in s], dtype=np.float64)
-        lx = ox + (pts[:, 0] / frame_width) * rw
-        ly = oy + (1.0 - pts[:, 1] / frame_height) * rh   # image v grows down
+        lu = ou + (pts[:, 0] / frame_width) * rw
+        lv = ov + (1.0 - pts[:, 1] / frame_height) * rh   # image v grows down
 
-        z_start = float(hi[2]) + 0.05
-        origins = np.column_stack([lx, ly, np.full(len(pts), z_start)])
-        dirs = np.tile([0.0, 0.0, -1.0], (len(pts), 1))
+        w_start = w_max + 0.05
+        origins = lu[:, None] * u + lv[:, None] * v + w_start * w
+        dirs = np.tile(-w, (len(pts), 1))
 
-        hit_pt, hit_n = self._raycast_down(origins, dirs)   # NaN rows = miss
+        hit_pt, hit_n = self._raycast(origins, dirs, w)     # NaN rows = miss
 
         # Offset along the outward (local +Z-ish) normal, then local → base.
         m = pose.matrix()
@@ -215,8 +249,12 @@ class SurfaceModel:
             i += c
         return out
 
-    def _raycast_down(self, origins: np.ndarray, dirs: np.ndarray):
-        """Nearest hit per ray. Returns (points, outward normals); NaN = miss."""
+    def _raycast(self, origins: np.ndarray, dirs: np.ndarray, w: np.ndarray):
+        """
+        Nearest hit per ray (rays travel along −w). Returns (points, outward
+        normals); NaN = miss. ``w`` is the draw-side direction — normals are
+        flipped to point toward it.
+        """
         locs, ray_idx, tri_idx = self.mesh.ray.intersects_location(
             origins, dirs, multiple_hits=True
         )
@@ -226,14 +264,15 @@ class SurfaceModel:
         if len(locs) == 0:
             return pts, nrm
 
-        # Keep the FIRST hit along the ray (max z, since rays point down).
-        best_z = np.full(n, -np.inf)
+        # Keep the FIRST hit along each ray = the highest w-coordinate.
+        best = np.full(n, -np.inf)
         for loc, ri, ti in zip(locs, ray_idx, tri_idx):
-            if loc[2] > best_z[ri]:
-                best_z[ri] = loc[2]
+            score = float(loc @ w)
+            if score > best[ri]:
+                best[ri] = score
                 pts[ri] = loc
                 fn = self.mesh.face_normals[ti]
-                nrm[ri] = fn if fn[2] >= 0 else -fn   # outward = toward local +Z
+                nrm[ri] = fn if fn @ w >= 0 else -fn   # outward = toward draw side
         return pts, nrm
 
 
