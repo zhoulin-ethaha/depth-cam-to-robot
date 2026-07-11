@@ -324,6 +324,7 @@ class Server:
                 freedrive  = self._state.get("freedrive", False)
                 ws_pts     = self._state.get("ws_points", {})
                 ws_cfg     = self._state.get("workspace")
+                exec_error = self._state.get("exec_error")
 
             msg = json.dumps({
                 "type": "state",
@@ -339,6 +340,7 @@ class Server:
                     for k, vals in ws_pts.items()
                 },
                 "workspace": ws_cfg.to_browser_dict() if ws_cfg is not None else None,
+                "exec_error": exec_error,
             })
 
             dead = set()

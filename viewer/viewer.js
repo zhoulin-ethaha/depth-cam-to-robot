@@ -387,6 +387,12 @@ function updateFooter(data) {
   document.getElementById("val-phase").textContent   = data.phase || "idle";
   document.getElementById("val-strokes").textContent = data.stroke_count ?? 0;
 
+  // Surface executor failures (unreachable pose, robot not in Remote, …) so
+  // the reason is visible at the rig, not just in the terminal.
+  if (data.phase === "error" && data.exec_error) {
+    setHeaderStatus("robot", false, "Run failed: " + data.exec_error);
+  }
+
   setButtonsForPhase(data.phase);
   syncEditUI(data.phase);
   setProgress(data.progress || 0);

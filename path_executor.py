@@ -63,9 +63,10 @@ class PathExecutor:
 
     def _run(self, strokes: list[list[list[float]]]) -> None:
         with self._state_lock:
-            self._state["executing"] = True
-            self._state["phase"]     = "executing"
-            self._state["progress"]  = 0.0
+            self._state["executing"]  = True
+            self._state["phase"]      = "executing"
+            self._state["progress"]   = 0.0
+            self._state["exec_error"] = None
 
         total_moves = sum(len(s) for s in strokes) + len(strokes) * 2
         moves_done  = 0
@@ -125,9 +126,10 @@ class PathExecutor:
         except Exception as exc:
             print(f"[executor] error during path execution: {exc}")
             with self._state_lock:
-                self._state["executing"] = False
-                self._state["phase"]     = "error"
-                self._state["progress"]  = 0.0
+                self._state["executing"]  = False
+                self._state["phase"]      = "error"
+                self._state["progress"]   = 0.0
+                self._state["exec_error"] = str(exc)   # surfaced in the browser header
             return
 
         with self._state_lock:
