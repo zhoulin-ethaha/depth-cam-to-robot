@@ -13,10 +13,13 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 
+import math
+
 from config import (
     HTTP_HOST, HTTP_PORT, CONTOUR_MIN_PIXELS,
     DEPTH_WIDTH, DEPTH_HEIGHT, SURFACE_DIR,
     DRAW_Z, DRAW_SPEED, TRAVEL_Z, MAX_TCP_SPEED,
+    UR_REACH_M, UR_MIN_REACH_M,
 )
 from camera_thread import DepthCameraThread
 from depth_extractor import (
@@ -154,6 +157,28 @@ async def on_simulate_workspace() -> None:
 
 
 # ── Capture image / Edit / Generate path callbacks ───────────────────────────
+def _reach_flags(strokes: list[list[list[float]]]) -> tuple[list[list[int]], int, int]:
+    """
+    Estimate which waypoints the arm can reach: inside a UR_REACH_M sphere
+    around the base and outside a thin UR_MIN_REACH_M cylinder around the base
+    axis. Returns (per-stroke 0/1 flags where 1 = unreachable, n_out, n_total).
+    Envelope check only — joint limits/wrist configuration are not modelled.
+    """
+    flags: list[list[int]] = []
+    n_out = n_total = 0
+    for stroke in strokes:
+        f = []
+        for p in stroke:
+            r = math.sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2])
+            r_xy = math.hypot(p[0], p[1])
+            bad = int(r > UR_REACH_M or r_xy < UR_MIN_REACH_M)
+            f.append(bad)
+            n_out += bad
+            n_total += 1
+        flags.append(f)
+    return flags, n_out, n_total
+
+
 def _mm_per_px(workspace, surface_model=None) -> float | None:
     """
     Millimetres per depth pixel for the mm-based groove filters. Planar mode
@@ -388,6 +413,8 @@ async def on_generate_path(ws, params: dict) -> None:
         for stroke in robot_strokes
     ]
 
+    reach_flags, reach_out, reach_total = _reach_flags(robot_strokes)
+
     with state_lock:
         shared_state["strokes"] = robot_strokes
         shared_state["strokes_surface"] = surface_mode
@@ -399,8 +426,12 @@ async def on_generate_path(ws, params: dict) -> None:
         stroke_count=extracted.total_strokes,
         point_count=extracted.total_points,
         strokes_data=strokes_data,
+        reach_flags=reach_flags,
+        reach_out=reach_out,
     )
-    print(f"Generated path: {extracted.total_strokes} strokes, {extracted.total_points} points")
+    print(f"Generated path: {extracted.total_strokes} strokes, {extracted.total_points} points"
+          + (f" — WARNING: {reach_out}/{reach_total} waypoints outside estimated reach"
+             if reach_out else ""))
 
 
 async def on_retake(ws) -> None:
@@ -489,6 +520,27 @@ server = Server(
 
 # Camera starts immediately so both MJPEG feeds are live from the moment you open the browser
 camera_thread.start()
+
+
+# ── Live TCP poller ───────────────────────────────────────────────────────────
+# Nothing else writes shared_state["ee"], so without this the preview's TCP dot
+# would sit at the origin forever. Poll the RTDE receive buffer at 10 Hz while
+# connected; the broadcast loop relays it to the browser.
+def _ee_poller() -> None:
+    import time
+    while True:
+        time.sleep(0.1)
+        if not robot.connected:
+            continue
+        try:
+            pose = robot.get_ee_position()
+            with state_lock:
+                shared_state["ee"] = list(pose)
+        except Exception:
+            pass
+
+
+threading.Thread(target=_ee_poller, daemon=True, name="ee_poller").start()
 
 
 async def _open_browser() -> None:

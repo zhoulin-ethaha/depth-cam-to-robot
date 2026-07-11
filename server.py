@@ -378,6 +378,8 @@ class Server:
         point_count: int = 0,
         strokes_data: Optional[list] = None,
         error: Optional[str] = None,
+        reach_flags: Optional[list] = None,
+        reach_out: int = 0,
     ) -> None:
         try:
             await ws.send_str(json.dumps({
@@ -387,6 +389,8 @@ class Server:
                 "point_count": point_count,
                 "strokes": strokes_data or [],
                 "error": error,
+                "reach_flags": reach_flags or [],
+                "reach_out": reach_out,
             }))
         except Exception:
             pass

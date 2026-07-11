@@ -70,6 +70,13 @@ DRAW_Z           = -0.010  # m — pen contact (negative = below workspace surfa
 TRAVEL_Z         =  0.050  # m — pen-up travel height above workspace surface origin
 DRAW_SPEED       = 0.05    # m/s during drawing strokes (default; UI Speed slider overrides)
 MAX_TCP_SPEED    = 1.0     # m/s — 100% on the Speed slider (UR10e rated max tool speed)
+
+# ── Reach estimate (UR10e) ────────────────────────────────────────────────────
+# Rough reachability envelope used to warn about waypoints the arm cannot get
+# to: a sphere of REACH_M around the base, minus a thin inner cylinder around
+# the base axis where the wrist cannot fold in. An estimate — not full IK.
+UR_REACH_M     = 1.30
+UR_MIN_REACH_M = 0.18
 DRAW_ACCEL       = 0.3     # m/s²
 TRAVEL_SPEED     = 0.15    # m/s during pen-up travel moves
 TRAVEL_ACCEL     = 0.5     # m/s²

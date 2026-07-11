@@ -5,7 +5,7 @@ from typing import Optional
 
 from scipy.spatial.transform import Rotation
 
-from config import DRAW_Z, TRAVEL_Z, DRAW_SPEED, TRAVEL_SPEED, TRAVEL_ACCEL, RTDE_FREQUENCY
+from config import DRAW_Z, TRAVEL_Z, DRAW_SPEED, TRAVEL_ACCEL, RTDE_FREQUENCY
 
 
 def _offset_pose(pose: list[float], dist: float) -> list[float]:
@@ -106,7 +106,7 @@ class PathExecutor:
                 # Retract from the current position along the tool axis (pulls
                 # away from the surface even when it is tilted or vertical).
                 lift_pose = _retract([cx, cy, cz, rx, ry, rz], self._travel_dist)
-                self._robot.move_to(lift_pose, TRAVEL_SPEED, TRAVEL_ACCEL)
+                self._robot.move_to(lift_pose, self._draw_speed, TRAVEL_ACCEL)
                 moves_done += 1
                 self._update_progress(moves_done, total_moves)
 
@@ -117,7 +117,7 @@ class PathExecutor:
                 # Travel to a point retracted off the stroke start, in the
                 # stroke's own approach orientation.
                 travel_pose = _retract(stroke[0], self._travel_dist)
-                self._robot.move_to(travel_pose, TRAVEL_SPEED, TRAVEL_ACCEL)
+                self._robot.move_to(travel_pose, self._draw_speed, TRAVEL_ACCEL)
                 moves_done += 1
                 self._update_progress(moves_done, total_moves)
 
@@ -138,11 +138,13 @@ class PathExecutor:
                 cx, cy, cz = stroke[-1][0], stroke[-1][1], stroke[-1][2] + self._draw_z
                 rx, ry, rz = stroke[-1][3], stroke[-1][4], stroke[-1][5]
 
-            # Final pen-up — retract along the tool axis
+            # Final pen-up — retract along the tool axis. All non-drawing moves
+            # use the same speed as drawing, so the Speed slider governs the
+            # entire actuation uniformly.
             if self._robot.connected:
                 final_ee = self._robot.get_ee_position()
                 self._robot.move_to(_retract(list(final_ee), self._travel_dist),
-                                    TRAVEL_SPEED, TRAVEL_ACCEL)
+                                    self._draw_speed, TRAVEL_ACCEL)
 
         except Exception as exc:
             print(f"[executor] error during path execution: {exc}")

@@ -152,15 +152,17 @@ class TestMoveSequence:
             pose = call[0][0]
             assert abs(pose[2] - DRAW_Z) < 1e-9
 
-    def test_lift_and_travel_use_travel_speed(self, one_stroke):
+    def test_lift_and_travel_use_uniform_draw_speed(self, one_stroke):
+        # The Speed setting governs the WHOLE actuation: lift/travel moves run
+        # at the same speed as drawing (default draw_speed = DRAW_SPEED).
         ex, robot, state, strokes = one_stroke
-        ex.start(strokes)
+        ex.start(strokes, draw_speed=0.2)
         _wait_done(ex)
         calls = robot.move_to.call_args_list
-        # call[0] = lift, call[1] = travel
-        for i in [0, 1]:
+        # call[0] = lift, call[1] = travel, call[-1] = final pen-up
+        for i in [0, 1, -1]:
             _, speed, accel = calls[i][0]
-            assert speed == TRAVEL_SPEED
+            assert speed == 0.2
             assert accel == TRAVEL_ACCEL
 
     def test_draw_calls_servo_for_each_waypoint(self, one_stroke):

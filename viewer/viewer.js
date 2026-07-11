@@ -132,18 +132,20 @@ let lastStrokes = null;
 let pathMode   = "path";   // "path" | "order"
 let orderSize  = 1.0;      // multiplier for order numbers + start/end dots
 
-function buildPathViz(strokes) {
+function buildPathViz(strokes, reachFlags) {
   if (pathGroup) { scene.remove(pathGroup); pathGroup = null; }
   lastStrokes = strokes && strokes.length ? strokes : null;
 
   if (lastStrokes) {
     pathGroup = new THREE.Group();
-    const drawMat   = new THREE.LineBasicMaterial({ color: 0x00e5a0 }); // green — draw
-    const travelMat = new THREE.LineBasicMaterial({ color: 0x444466 }); // gray  — travel
+    const travelMat = new THREE.LineBasicMaterial({ color: 0x444466 }); // gray — travel
+    const okPts  = [];   // reachable draw segments (green)
+    const badPts = [];   // unreachable draw segments (red)
 
     let prevEnd = null;
-    for (const stroke of lastStrokes) {
-      if (stroke.length === 0) continue;
+    lastStrokes.forEach((stroke, si) => {
+      if (stroke.length === 0) return;
+      const flags = reachFlags && reachFlags[si] ? reachFlags[si] : null;
 
       // Travel segment from previous stroke end to this stroke start
       if (prevEnd) {
@@ -152,16 +154,26 @@ function buildPathViz(strokes) {
         pathGroup.add(new THREE.Line(tGeo, travelMat));
       }
 
-      // Draw segment
-      const pts = stroke.map(p => new THREE.Vector3(p[0], p[1], p[2]));
-      if (pts.length > 1) {
-        const dGeo = new THREE.BufferGeometry().setFromPoints(pts);
-        pathGroup.add(new THREE.Line(dGeo, drawMat));
+      // Draw segments — red where either endpoint is outside estimated reach.
+      for (let i = 0; i + 1 < stroke.length; i++) {
+        const bad = flags && (flags[i] || flags[i + 1]);
+        const bucket = bad ? badPts : okPts;
+        bucket.push(new THREE.Vector3(stroke[i][0], stroke[i][1], stroke[i][2]),
+                    new THREE.Vector3(stroke[i + 1][0], stroke[i + 1][1], stroke[i + 1][2]));
       }
 
       prevEnd = new THREE.Vector3(stroke[stroke.length - 1][0],
                                   stroke[stroke.length - 1][1],
                                   stroke[stroke.length - 1][2]);
+    });
+
+    if (okPts.length) {
+      const geo = new THREE.BufferGeometry().setFromPoints(okPts);
+      pathGroup.add(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0x00e5a0 })));
+    }
+    if (badPts.length) {
+      const geo = new THREE.BufferGeometry().setFromPoints(badPts);
+      pathGroup.add(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0xff4444 })));
     }
     scene.add(pathGroup);
   }
@@ -331,10 +343,16 @@ function handleCaptureResult(data) {
   document.getElementById("val-strokes").textContent = data.stroke_count;
 
   if (data.strokes && data.strokes.length > 0) {
-    buildPathViz(data.strokes);
+    buildPathViz(data.strokes, data.reach_flags);
     setButtonsForPhase("captured");
-    setHeaderStatus("robot", true,
-      `Path ready: ${data.stroke_count} strokes, ${data.point_count} points`);
+    if (data.reach_out > 0) {
+      setHeaderStatus("robot", false,
+        `⚠ ${data.reach_out} waypoints outside the arm's estimated reach — shown in RED. ` +
+        `Move the surface closer / crop smaller before running.`);
+    } else {
+      setHeaderStatus("robot", true,
+        `Path ready: ${data.stroke_count} strokes, ${data.point_count} points — all within estimated reach`);
+    }
   } else {
     buildPathViz(null);
     setButtonsForPhase("editing");
