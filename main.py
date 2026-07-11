@@ -17,7 +17,7 @@ import math
 
 from config import (
     HTTP_HOST, HTTP_PORT, CONTOUR_MIN_PIXELS,
-    DEPTH_WIDTH, DEPTH_HEIGHT, SURFACE_DIR,
+    DEPTH_WIDTH, DEPTH_HEIGHT, DEPTH_FPS, DEPTH_AVERAGE_FRAMES, SURFACE_DIR,
     DRAW_Z, DRAW_SPEED, TRAVEL_Z, MAX_TCP_SPEED,
     UR_REACH_M, UR_MIN_REACH_M,
 )
@@ -40,6 +40,8 @@ shared_state: dict = {
     "last_rgb_jpg":        None,     # aligned colour image (live view)
     "last_groove_jpg":     None,     # detected groove skeleton (live preview)
     "last_mask_jpg":       None,     # thick detected-region mask (live preview)
+    "last_mask_full_jpg":  None,     # full-frame mask for the projector (gated)
+    "projection_clients":  0,        # connected projection windows
     "workspace":           None,     # WorkspaceConfig | None — confirmed workspace
     "pending_workspace":   None,     # WorkspaceConfig | None — loaded from disk
     "ws_points":           {"p0": None, "px": None, "py": None},
@@ -289,25 +291,38 @@ async def on_clear_surface() -> None:
 
 async def on_capture_image(ws) -> None:
     """Freeze a temporally averaged depth (+ colour) frame and enter editing."""
-    captured = camera_thread.capture_frame()
-    if captured is None:
-        await server.send_capture_result(ws, False, error="No depth frame available.")
-        return
-
-    depth_m, valid, rgb = captured
-    h, w = depth_m.shape[:2]
+    # If a projector is running, blank it and wait for the rolling depth buffer
+    # to refill with projector-free frames — the average uses the PAST second,
+    # so blanking without the wait would not help.
     with state_lock:
-        shared_state["captured_still"] = (depth_m, valid, rgb)
-        shared_state["still_dims"]     = (w, h)
-        shared_state["phase"]          = "editing"
-        shared_state["strokes"]        = []
+        proj = shared_state.get("projection_clients", 0) > 0
+    if proj:
+        await server.broadcast_projection_blank(True)
+        await asyncio.sleep(DEPTH_AVERAGE_FRAMES / DEPTH_FPS + 0.3)
 
-    loop = asyncio.get_running_loop()
-    color = await loop.run_in_executor(None, colorize_depth, depth_m, valid)
-    depth_jpg = await loop.run_in_executor(None, encode_jpeg, color)
-    rgb_jpg = await loop.run_in_executor(None, encode_jpeg, rgb) if rgb is not None else None
-    await server.send_still(ws, depth_jpg=depth_jpg, rgb_jpg=rgb_jpg, width=w, height=h)
-    print(f"Captured still: {w}×{h} (depth+colour) — ready for crop/adjust")
+    try:
+        captured = camera_thread.capture_frame()
+        if captured is None:
+            await server.send_capture_result(ws, False, error="No depth frame available.")
+            return
+
+        depth_m, valid, rgb = captured
+        h, w = depth_m.shape[:2]
+        with state_lock:
+            shared_state["captured_still"] = (depth_m, valid, rgb)
+            shared_state["still_dims"]     = (w, h)
+            shared_state["phase"]          = "editing"
+            shared_state["strokes"]        = []
+
+        loop = asyncio.get_running_loop()
+        color = await loop.run_in_executor(None, colorize_depth, depth_m, valid)
+        depth_jpg = await loop.run_in_executor(None, encode_jpeg, color)
+        rgb_jpg = await loop.run_in_executor(None, encode_jpeg, rgb) if rgb is not None else None
+        await server.send_still(ws, depth_jpg=depth_jpg, rgb_jpg=rgb_jpg, width=w, height=h)
+        print(f"Captured still: {w}×{h} (depth+colour) — ready for crop/adjust")
+    finally:
+        if proj:
+            await server.broadcast_projection_blank(False)
 
 
 async def on_preview_adjust(ws, params: dict) -> None:

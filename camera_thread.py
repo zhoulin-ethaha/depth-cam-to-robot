@@ -136,6 +136,7 @@ class DepthCameraThread:
         frame_i = 0
         last_groove_jpg: Optional[bytes] = None
         last_mask_jpg: Optional[bytes] = None
+        last_mask_full_jpg: Optional[bytes] = None
         try:
             while not self._stop_event.is_set():
                 try:
@@ -174,6 +175,21 @@ class DepthCameraThread:
                         last_groove_jpg = sj
                     if mj is not None:
                         last_mask_jpg = mj
+
+                    # Full-frame mask for the projector: the cropped mask pasted
+                    # back at its frame position, so the projection homography
+                    # has stable full-frame coordinates regardless of the crop.
+                    # Composed ONLY while a projection window is connected.
+                    with self._state_lock:
+                        proj_on = self._state.get("projection_clients", 0) > 0
+                    if proj_on:
+                        full = np.zeros(z.shape, np.uint8)
+                        full[y0:y1, x0:x1] = mask
+                        fj = encode_jpeg(full)
+                        if fj is not None:
+                            last_mask_full_jpg = fj
+                    else:
+                        last_mask_full_jpg = None
                 frame_i += 1
 
                 if ok_color:
@@ -182,6 +198,7 @@ class DepthCameraThread:
                         self._state["last_rgb_jpg"] = rgb_jpg
                         self._state["last_groove_jpg"] = last_groove_jpg
                         self._state["last_mask_jpg"] = last_mask_jpg
+                        self._state["last_mask_full_jpg"] = last_mask_full_jpg
 
                 # Buffer raw metric depth (+ latest RGB) for averaged Capture.
                 with self._frame_lock:
@@ -195,6 +212,7 @@ class DepthCameraThread:
                 self._state["last_rgb_jpg"] = None
                 self._state["last_groove_jpg"] = None
                 self._state["last_mask_jpg"] = None
+                self._state["last_mask_full_jpg"] = None
             with self._frame_lock:
                 self._buffer.clear()
                 self._last_rgb = None

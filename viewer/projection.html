@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Sand Projection</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; background: #000; overflow: hidden;
+               font-family: "SF Mono", "Fira Code", monospace; cursor: none; }
+  body.editing { cursor: default; }
+
+  /* The warped mask. transform (matrix3d) is set from the 4 corners. */
+  #warp {
+    position: absolute; top: 0; left: 0;
+    transform-origin: 0 0;
+    will-change: transform;
+  }
+  #warp img { display: block; width: 100%; height: 100%;
+              image-rendering: auto; user-select: none; -webkit-user-drag: none; }
+
+  /* Corner handles (calibration mode) */
+  .handle {
+    position: absolute; width: 26px; height: 26px; margin: -13px 0 0 -13px;
+    border: 2px solid #00e5a0; border-radius: 50%;
+    background: rgba(0, 229, 160, 0.15); color: #00e5a0;
+    font-size: 11px; line-height: 22px; text-align: center;
+    cursor: grab; z-index: 10; user-select: none;
+  }
+  .handle.sel { border-color: #ffcc00; color: #ffcc00; background: rgba(255,204,0,0.18); }
+  body:not(.editing) .handle { display: none; }
+
+  #hint {
+    position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%);
+    color: #9ad; background: rgba(10,14,20,0.85); border: 1px solid #345;
+    padding: 8px 14px; border-radius: 6px; font-size: 12px; z-index: 20;
+    white-space: nowrap;
+  }
+  body:not(.editing) #hint { display: none; }
+
+  #blank { position: absolute; inset: 0; background: #000; z-index: 50; display: none; }
+  #blank.on { display: block; }
+</style>
+</head>
+<body class="editing">
+
+  <div id="warp"><img id="mask" src="/depth/mask/full" alt="" /></div>
+
+  <div class="handle" data-i="0">1</div>
+  <div class="handle" data-i="1">2</div>
+  <div class="handle" data-i="2">3</div>
+  <div class="handle" data-i="3">4</div>
+
+  <div id="hint">
+    Drag corners 1–4 onto the sand (rake reference marks first) ·
+    click a handle + arrow keys = 1&nbsp;px (Shift = 10) ·
+    <b>C</b> toggle calibration · <b>B</b> blank · <b>F11</b> fullscreen
+  </div>
+
+  <div id="blank"></div>
+
+<script>
+/* ── Corner-pin homography → CSS matrix3d ─────────────────────────────────
+   Maps the mask image's own rect (0,0)-(w,h) onto 4 arbitrary screen points.
+   Corner order: 0=TL, 1=TR, 2=BL, 3=BR (of the SOURCE image).              */
+function adj(m) {
+  return [m[4]*m[8]-m[5]*m[7], m[2]*m[7]-m[1]*m[8], m[1]*m[5]-m[2]*m[4],
+          m[5]*m[6]-m[3]*m[8], m[0]*m[8]-m[2]*m[6], m[2]*m[3]-m[0]*m[5],
+          m[3]*m[7]-m[4]*m[6], m[1]*m[6]-m[0]*m[7], m[0]*m[4]-m[1]*m[3]];
+}
+function mulMM(a, b) {
+  const c = [];
+  for (let i = 0; i < 3; i++)
+    for (let j = 0; j < 3; j++) {
+      let s = 0;
+      for (let k = 0; k < 3; k++) s += a[3*i+k] * b[3*k+j];
+      c[3*i+j] = s;
+    }
+  return c;
+}
+function mulMV(m, v) {
+  return [m[0]*v[0]+m[1]*v[1]+m[2]*v[2],
+          m[3]*v[0]+m[4]*v[1]+m[5]*v[2],
+          m[6]*v[0]+m[7]*v[1]+m[8]*v[2]];
+}
+function basisToPoints(p1, p2, p3, p4) {
+  const m = [p1[0], p2[0], p3[0],  p1[1], p2[1], p3[1],  1, 1, 1];
+  const v = mulMV(adj(m), [p4[0], p4[1], 1]);
+  return mulMM(m, [v[0],0,0, 0,v[1],0, 0,0,v[2]]);
+}
+function proj2d(srcPts, dstPts) {
+  const s = basisToPoints(...srcPts);
+  const d = basisToPoints(...dstPts);
+  return mulMM(d, adj(s));
+}
+
+/* ── State ────────────────────────────────────────────────────────────── */
+const SRC_W = 640, SRC_H = 480;          // full-frame mask resolution
+const warp = document.getElementById("warp");
+const maskImg = document.getElementById("mask");
+const handles = [...document.querySelectorAll(".handle")];
+let corners = null;                       // 4×[x,y], normalized 0..1 of window
+let selected = -1;
+
+function defaultCorners() {
+  return [[0.2, 0.2], [0.8, 0.2], [0.2, 0.8], [0.8, 0.8]];  // TL TR BL BR
+}
+
+function applyWarp() {
+  const W = window.innerWidth, H = window.innerHeight;
+  warp.style.width = SRC_W + "px";
+  warp.style.height = SRC_H + "px";
+  const dst = corners.map(c => [c[0] * W, c[1] * H]);
+  // src corners in the same order: TL TR BL BR
+  const t = proj2d([[0,0], [SRC_W,0], [0,SRC_H], [SRC_W,SRC_H]], dst);
+  for (let i = 0; i < 9; i++) t[i] /= t[8];
+  warp.style.transform = "matrix3d(" +
+    [t[0],t[3],0,t[6], t[1],t[4],0,t[7], 0,0,1,0, t[2],t[5],0,t[8]].join(",") + ")";
+  handles.forEach((h, i) => {
+    h.style.left = dst[i][0] + "px";
+    h.style.top  = dst[i][1] + "px";
+  });
+}
+
+let saveTimer = null;
+function saveCorners() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    fetch("/projection/corners", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ corners }),
+    }).catch(() => {});
+  }, 300);
+}
+
+/* ── Handle dragging ──────────────────────────────────────────────────── */
+handles.forEach((h, i) => {
+  h.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    selected = i;
+    handles.forEach((x, j) => x.classList.toggle("sel", j === i));
+    const move = (ev) => {
+      corners[i] = [ev.clientX / window.innerWidth, ev.clientY / window.innerHeight];
+      applyWarp();
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      saveCorners();
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  });
+});
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "c" || e.key === "C") {
+    document.body.classList.toggle("editing");
+    return;
+  }
+  if (e.key === "b" || e.key === "B") {
+    document.getElementById("blank").classList.toggle("on");
+    return;
+  }
+  if (selected < 0 || !document.body.classList.contains("editing")) return;
+  const step = (e.shiftKey ? 10 : 1);
+  const dx = step / window.innerWidth, dy = step / window.innerHeight;
+  if (e.key === "ArrowLeft")  corners[selected][0] -= dx;
+  else if (e.key === "ArrowRight") corners[selected][0] += dx;
+  else if (e.key === "ArrowUp")    corners[selected][1] -= dy;
+  else if (e.key === "ArrowDown")  corners[selected][1] += dy;
+  else return;
+  e.preventDefault();
+  applyWarp();
+  saveCorners();
+});
+
+window.addEventListener("resize", applyWarp);
+
+/* ── WebSocket: register as a projection client; obey blank commands ──── */
+let ws = null;
+function connectWS() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onopen = () => ws.send(JSON.stringify({ type: "projection_hello" }));
+  ws.onclose = () => setTimeout(connectWS, 2000);
+  ws.onmessage = (ev) => {
+    const data = JSON.parse(ev.data);
+    if (data.type === "projection_blank") {
+      document.getElementById("blank").classList.toggle("on", !!data.on);
+    }
+  };
+}
+connectWS();
+
+/* ── Init: load saved corners ─────────────────────────────────────────── */
+fetch("/projection/corners")
+  .then(r => r.json())
+  .then(d => {
+    corners = (d.corners && d.corners.length === 4) ? d.corners : defaultCorners();
+    if (d.corners) document.body.classList.remove("editing");  // calibrated before
+    applyWarp();
+  })
+  .catch(() => { corners = defaultCorners(); applyWarp(); });
+</script>
+</body>
+</html>

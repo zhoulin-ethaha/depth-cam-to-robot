@@ -545,6 +545,31 @@ function syncEditUI(phase) {
   showEditing(phase);
 }
 
+/* ── Projection window (projector output) ──────────────────────────────── */
+/* Opens /projection in its own window: drag it onto the projector display and
+   press F11. The full-frame mask is only composed while this window is open,
+   so there is zero projection overhead otherwise. */
+let projWin = null;
+const btnProject = document.getElementById("btn-project");
+btnProject.addEventListener("click", () => {
+  if (projWin && !projWin.closed) { projWin.focus(); return; }
+  projWin = window.open("/projection", "sandProjection", "width=1280,height=720");
+  if (!projWin) {
+    setHeaderStatus("robot", false, "Pop-up blocked — allow pop-ups for this site.");
+    return;
+  }
+  btnProject.classList.add("active");
+  const watch = setInterval(() => {
+    if (!projWin || projWin.closed) {
+      clearInterval(watch);
+      btnProject.classList.remove("active");
+      projWin = null;
+    }
+  }, 1000);
+  setHeaderStatus("robot", true,
+    "Projection window opened — move it to the projector display, press F11, then drag corners 1–4 onto the sand.");
+});
+
 /* ── Swap the left/right position of a row's two viewports ──────────────── */
 document.getElementById("swap-depth").addEventListener("click", () => {
   document.getElementById("row-depth").classList.toggle("swapped");

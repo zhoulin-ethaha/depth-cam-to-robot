@@ -285,6 +285,26 @@ draws on a *real* physical surface, the virtual placement must match reality —
 set the sliders to where the object sits relative to the robot base and verify
 with the preview and a slow, offset-first run.
 
+### Projecting the mask onto the sand
+
+A projector pointed at the sandbox can light up the detected grooves in place —
+the **⧉ Project** button on the **Mask** viewport opens `/projection` in its own
+window; drag it onto the projector display and press **F11**. No extra software
+is needed (a corner-pin homography in the browser does the mapping), and the
+projector-side stream is only computed while the window is open.
+
+- **Calibrate once:** rake reference marks into the sand corners, then drag the
+  projected corner handles **1–4** until the white mask lands on the physical
+  marks (arrow keys nudge 1 px, Shift = 10 px). Saved to `settings.json`;
+  **C** re-enters calibration, **B** blanks manually.
+- The projection uses the **full-frame** mask (stable coordinates regardless of
+  the crop box), so it always matches the camera's view of the sand.
+- **Capture auto-blanks** the projector and waits ~1 s for the depth buffer to
+  refill, so projected light never contaminates the captured depth.
+- Projector setup: keystone OFF, no digital zoom (the corner-pin handles all
+  geometry), fixed mount — recalibrate after any bump. Valid for the calibrated
+  sand plane; a dimmer room gives crisper grooves.
+
 ---
 
 ## Configuration reference

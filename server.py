@@ -12,7 +12,7 @@ from config import (
     DEPTH_PATH, RGB_PATH, GROOVE_PATH, MASK_PATH, WS_PATH, STATIC_PATH,
     SURFACE_UPLOAD_URL,
 )
-from settings import load_settings
+from settings import load_settings, save_settings
 
 _VIEWER_DIR = Path(__file__).parent / "viewer"
 
@@ -71,6 +71,7 @@ class Server:
         self._on_set_surface_pose = on_set_surface_pose
         self._on_clear_surface = on_clear_surface
         self._ws_clients: set[web.WebSocketResponse] = set()
+        self._projection_clients: set[web.WebSocketResponse] = set()
         self._app = self._build_app()
 
     def _build_app(self) -> web.Application:
@@ -81,6 +82,10 @@ class Server:
         app.router.add_get(GROOVE_PATH, self._handle_grooves)
         app.router.add_get(MASK_PATH, self._handle_mask)
         app.router.add_post(SURFACE_UPLOAD_URL, self._handle_surface_upload)
+        app.router.add_get("/projection", self._handle_projection_page)
+        app.router.add_get("/depth/mask/full", self._handle_mask_full)
+        app.router.add_get("/projection/corners", self._handle_corners_get)
+        app.router.add_post("/projection/corners", self._handle_corners_post)
         app.router.add_get(WS_PATH, self._handle_ws)
         app.router.add_static(STATIC_PATH, _VIEWER_DIR, show_index=False)
         return app
@@ -129,6 +134,43 @@ class Server:
     async def _handle_mask(self, request: web.Request) -> web.StreamResponse:
         return await self._mjpeg_stream(request, "last_mask_jpg")
 
+    async def _handle_mask_full(self, request: web.Request) -> web.StreamResponse:
+        return await self._mjpeg_stream(request, "last_mask_full_jpg")
+
+    async def _handle_projection_page(self, request: web.Request) -> web.FileResponse:
+        return web.FileResponse(_VIEWER_DIR / "projection.html")
+
+    async def _handle_corners_get(self, request: web.Request) -> web.Response:
+        corners = load_settings().get("projection_corners")
+        return web.json_response({"corners": corners})
+
+    async def _handle_corners_post(self, request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+            corners = data.get("corners")
+            if (not isinstance(corners, list) or len(corners) != 4
+                    or not all(isinstance(c, list) and len(c) == 2 for c in corners)):
+                return web.json_response({"ok": False, "error": "need 4 [x,y] corners"},
+                                         status=400)
+            save_settings({"projection_corners": corners})
+            return web.json_response({"ok": True})
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+    def _set_projection_count(self) -> None:
+        with self._lock:
+            self._state["projection_clients"] = len(self._projection_clients)
+
+    async def broadcast_projection_blank(self, on: bool) -> None:
+        """Blank/unblank connected projection windows (used during Capture)."""
+        msg = json.dumps({"type": "projection_blank", "on": on})
+        for client in list(self._projection_clients):
+            try:
+                await client.send_str(msg)
+            except Exception:
+                self._projection_clients.discard(client)
+        self._set_projection_count()
+
     async def _handle_surface_upload(self, request: web.Request) -> web.Response:
         """Receive an STL/OBJ mesh (multipart form field 'file') and load it."""
         if not self._on_surface_upload:
@@ -159,6 +201,8 @@ class Server:
                     await self._handle_ws_message(ws, msg.data)
         finally:
             self._ws_clients.discard(ws)
+            self._projection_clients.discard(ws)
+            self._set_projection_count()
             if not self._ws_clients and self._on_last_disconnect:
                 asyncio.create_task(self._on_last_disconnect())
 
@@ -270,6 +314,12 @@ class Server:
         elif msg_type == "clear_surface":
             if self._on_clear_surface:
                 asyncio.create_task(self._on_clear_surface())
+
+        elif msg_type == "projection_hello":
+            # This socket is a projection window: full-frame mask composition
+            # in the camera thread switches on while any are connected.
+            self._projection_clients.add(ws)
+            self._set_projection_count()
 
     async def _broadcast_loop(self) -> None:
         while True:

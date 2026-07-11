@@ -122,6 +122,23 @@ main {
 }
 .swap-btn:hover { background: #2a2a2a; color: #fff; }
 
+/* Open the projector window from the Mask viewport. */
+#btn-project {
+  position: absolute;
+  top: 6px; right: 6px;
+  z-index: 11;
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  background: #161616cc;
+  border: 1px solid #3a3a3a;
+  color: #bbb;
+  border-radius: 4px;
+  cursor: pointer;
+}
+#btn-project:hover { background: #2a2a2a; color: #fff; }
+#btn-project.active { border-color: #00e5a0; color: #00e5a0; }
+
 #panel-3d {
   grid-column: 3;
   grid-row: 1 / span 2;
