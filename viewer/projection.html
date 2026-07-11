@@ -53,7 +53,7 @@
   <div id="hint">
     Drag corners 1–4 onto the sand (rake reference marks first) ·
     click a handle + arrow keys = 1&nbsp;px (Shift = 10) ·
-    <b>C</b> toggle calibration · <b>B</b> blank · <b>F11</b> fullscreen
+    <b>C</b> hide/show handles when done · <b>B</b> blank · <b>F11</b> fullscreen
   </div>
 
   <div id="blank"></div>
@@ -194,11 +194,12 @@ function connectWS() {
 connectWS();
 
 /* ── Init: load saved corners ─────────────────────────────────────────── */
+/* Always open in calibration mode (handles visible) — saved corners are
+   restored, and pressing C hides the handles for clean projection. */
 fetch("/projection/corners")
   .then(r => r.json())
   .then(d => {
     corners = (d.corners && d.corners.length === 4) ? d.corners : defaultCorners();
-    if (d.corners) document.body.classList.remove("editing");  // calibrated before
     applyWarp();
   })
   .catch(() => { corners = defaultCorners(); applyWarp(); });
