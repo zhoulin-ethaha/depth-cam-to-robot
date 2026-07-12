@@ -41,6 +41,25 @@
   }
   body.cal #cal-badge { display: block; }
 
+  /* The projector's physical frame (0..1 area), visible while zoomed/panned. */
+  #proj-bounds {
+    position: absolute;
+    border: 2px dashed #3399ff;
+    color: #3399ff; font-size: 11px;
+    pointer-events: none; z-index: 5;
+    display: none;
+  }
+  #proj-bounds::after { content: "projector frame"; position: absolute; top: 2px; left: 6px; }
+  body.cal #proj-bounds { display: block; }
+
+  #zoom-hud {
+    position: absolute; right: 12px; bottom: 12px;
+    color: #9ad; background: rgba(10,14,20,0.85); border: 1px solid #345;
+    padding: 4px 10px; border-radius: 6px; font-size: 11px; z-index: 20;
+    display: none;
+  }
+  body.cal #zoom-hud { display: block; }
+
   #hint {
     position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%);
     color: #9ad; background: rgba(10,14,20,0.85); border: 1px solid #345;
@@ -62,12 +81,15 @@
   <div class="handle" data-i="2">3</div>
   <div class="handle" data-i="3">4</div>
 
+  <div id="proj-bounds"></div>
   <div id="cal-badge">CALIBRATION — the projector window mirrors these handles live</div>
+  <div id="zoom-hud">zoom 100%</div>
 
   <div id="hint">
     Drag corners 1–4 while watching the sand ·
-    click a handle + arrow keys = 1&nbsp;px (Shift = 10) ·
-    <b>C</b> hide/show handles · <b>B</b> blank · <b>F11</b> fullscreen
+    arrow keys = 1&nbsp;px (Shift = 10) ·
+    <b>wheel</b> zoom · <b>drag background</b> pan · <b>0</b> reset view ·
+    <b>C</b> handles · <b>B</b> blank
   </div>
 
   <div id="blank"></div>
@@ -127,15 +149,27 @@ let corners = defaultCorners();
 let selected = -1;
 let dragging = false;                     // suppress applying our own WS echo
 
+/* Calibration-window VIEW transform (display only). Zooming out lets handles
+   be placed BEYOND the projector frame — corners stay in projector-normalized
+   coordinates, so the output window is completely unaffected by the view. */
+let view = { scale: 1, ox: 0, oy: 0 };
+function normToScreen(nx, ny) {
+  return [nx * window.innerWidth * view.scale + view.ox,
+          ny * window.innerHeight * view.scale + view.oy];
+}
+function screenToNorm(px, py) {
+  return [(px - view.ox) / (window.innerWidth * view.scale),
+          (py - view.oy) / (window.innerHeight * view.scale)];
+}
+
 document.title = IS_CAL ? "Projection Calibration" : "Sand Projection";
 document.body.classList.toggle("editing", IS_CAL);   // output starts clean
 document.body.classList.toggle("cal", IS_CAL);
 
 function applyWarp() {
-  const W = window.innerWidth, H = window.innerHeight;
   warp.style.width = SRC_W + "px";
   warp.style.height = SRC_H + "px";
-  const dst = corners.map(c => [c[0] * W, c[1] * H]);
+  const dst = corners.map(c => normToScreen(c[0], c[1]));
   // src corners in the same order: TL TR BL BR
   const t = proj2d([[0,0], [SRC_W,0], [0,SRC_H], [SRC_W,SRC_H]], dst);
   for (let i = 0; i < 9; i++) t[i] /= t[8];
@@ -145,6 +179,16 @@ function applyWarp() {
     h.style.left = dst[i][0] + "px";
     h.style.top  = dst[i][1] + "px";
   });
+
+  // Projector frame outline + zoom readout (calibration view only).
+  const pb = document.getElementById("proj-bounds");
+  const [bx, by] = normToScreen(0, 0);
+  pb.style.left = bx + "px";
+  pb.style.top = by + "px";
+  pb.style.width = (window.innerWidth * view.scale) + "px";
+  pb.style.height = (window.innerHeight * view.scale) + "px";
+  document.getElementById("zoom-hud").textContent =
+    "zoom " + Math.round(view.scale * 100) + "%  ·  0 = reset";
 }
 
 let saveTimer = null;
@@ -182,7 +226,7 @@ handles.forEach((h, i) => {
     dragging = true;
     h.setPointerCapture(e.pointerId);
     const move = (ev) => {
-      corners[i] = [ev.clientX / window.innerWidth, ev.clientY / window.innerHeight];
+      corners[i] = screenToNorm(ev.clientX, ev.clientY);
       applyWarp();
       broadcastCorners();
     };
@@ -209,9 +253,15 @@ window.addEventListener("keydown", (e) => {
     document.getElementById("blank").classList.toggle("on");
     return;
   }
+  if (e.key === "0" && IS_CAL) {                 // reset the calibration view
+    view = { scale: 1, ox: 0, oy: 0 };
+    applyWarp();
+    return;
+  }
   if (selected < 0 || !document.body.classList.contains("editing")) return;
   const step = (e.shiftKey ? 10 : 1);
-  const dx = step / window.innerWidth, dy = step / window.innerHeight;
+  const dx = step / (window.innerWidth * view.scale);
+  const dy = step / (window.innerHeight * view.scale);
   if (e.key === "ArrowLeft")  corners[selected][0] -= dx;
   else if (e.key === "ArrowRight") corners[selected][0] += dx;
   else if (e.key === "ArrowUp")    corners[selected][1] -= dy;
@@ -224,6 +274,40 @@ window.addEventListener("keydown", (e) => {
 });
 
 window.addEventListener("resize", applyWarp);
+
+/* ── Calibration view: wheel zoom (about the cursor) + background pan ──── */
+if (IS_CAL) {
+  window.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const f = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    const ns = Math.min(5, Math.max(0.15, view.scale * f));
+    const k = ns / view.scale;
+    // Keep the point under the cursor fixed while zooming.
+    view.ox = e.clientX - k * (e.clientX - view.ox);
+    view.oy = e.clientY - k * (e.clientY - view.oy);
+    view.scale = ns;
+    applyWarp();
+  }, { passive: false });
+
+  window.addEventListener("pointerdown", (e) => {
+    // Pan on background drags only — handles and UI chrome keep their jobs.
+    if (e.target.closest(".handle") || e.target.closest("#hint")
+        || e.target.closest("#cal-badge") || e.target.closest("#zoom-hud")) return;
+    e.preventDefault();
+    const sx = e.clientX - view.ox, sy = e.clientY - view.oy;
+    const move = (ev) => {
+      view.ox = ev.clientX - sx;
+      view.oy = ev.clientY - sy;
+      applyWarp();
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  });
+}
 
 /* ── WebSocket: register as a projection client; obey blank commands ──── */
 let ws = null;
