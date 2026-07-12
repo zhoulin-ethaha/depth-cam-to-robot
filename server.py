@@ -321,6 +321,24 @@ class Server:
             self._projection_clients.add(ws)
             self._set_projection_count()
 
+        elif msg_type == "projection_corners":
+            # Corner-pin update from the calibration window: persist it and
+            # mirror it to the other projection windows (e.g. the projector
+            # output) so they warp live while the user drags on the laptop.
+            corners = data.get("corners")
+            if (isinstance(corners, list) and len(corners) == 4
+                    and all(isinstance(c, list) and len(c) == 2 for c in corners)):
+                save_settings({"projection_corners": corners})
+                msg = json.dumps({"type": "projection_corners", "corners": corners})
+                for client in list(self._projection_clients):
+                    if client is ws:
+                        continue          # don't echo back to the sender
+                    try:
+                        await client.send_str(msg)
+                    except Exception:
+                        self._projection_clients.discard(client)
+                self._set_projection_count()
+
     async def _broadcast_loop(self) -> None:
         while True:
             await asyncio.sleep(VIS_INTERVAL)

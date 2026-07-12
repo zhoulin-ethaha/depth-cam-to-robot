@@ -549,25 +549,42 @@ function syncEditUI(phase) {
 /* Opens /projection in its own window: drag it onto the projector display and
    press F11. The full-frame mask is only composed while this window is open,
    so there is zero projection overhead otherwise. */
-let projWin = null;
-const btnProject = document.getElementById("btn-project");
-btnProject.addEventListener("click", () => {
-  if (projWin && !projWin.closed) { projWin.focus(); return; }
-  projWin = window.open("/projection", "sandProjection", "width=1280,height=720");
-  if (!projWin) {
+function openProjWindow(btn, url, name, feature, message) {
+  let win = window.open(url, name, feature);
+  if (!win) {
     setHeaderStatus("robot", false, "Pop-up blocked — allow pop-ups for this site.");
-    return;
+    return null;
   }
-  btnProject.classList.add("active");
+  btn.classList.add("active");
   const watch = setInterval(() => {
-    if (!projWin || projWin.closed) {
+    if (!win || win.closed) {
       clearInterval(watch);
-      btnProject.classList.remove("active");
-      projWin = null;
+      btn.classList.remove("active");
     }
   }, 1000);
-  setHeaderStatus("robot", true,
-    "Projection window opened — move it to the projector display, press F11, then drag corners 1–4 onto the sand.");
+  setHeaderStatus("robot", true, message);
+  return win;
+}
+
+let projWin = null;
+let projCalWin = null;
+const btnProject = document.getElementById("btn-project");
+const btnProjectCal = document.getElementById("btn-project-cal");
+
+btnProject.addEventListener("click", () => {
+  if (projWin && !projWin.closed) { projWin.focus(); return; }
+  projWin = openProjWindow(btnProject, "/projection", "sandProjection",
+    "width=1920,height=1080",
+    "Projection window opened — move it to the projector display and press F11 " +
+    "(output resolution follows the display: set the projector to 4K in Windows for 4K).");
+});
+
+btnProjectCal.addEventListener("click", () => {
+  if (projCalWin && !projCalWin.closed) { projCalWin.focus(); return; }
+  projCalWin = openProjWindow(btnProjectCal, "/projection?cal", "sandProjectionCal",
+    "width=1100,height=760",
+    "Calibration window opened — keep it on this screen, drag handles 1–4 while " +
+    "watching the sand; the projector output follows live.");
 });
 
 /* ── Swap the left/right position of a row's two viewports ──────────────── */
