@@ -23,7 +23,8 @@ async def _no_cache_static(request: web.Request, handler):
     plain refresh. Covers both /static/* and the index page at '/' — otherwise a
     stale cached index.html can reference a fresh viewer.js and break the UI."""
     resp = await handler(request)
-    if (request.path == "/" or request.path.startswith(STATIC_PATH)) and not resp.prepared:
+    if (request.path in ("/", "/projection")
+            or request.path.startswith(STATIC_PATH)) and not resp.prepared:
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
 

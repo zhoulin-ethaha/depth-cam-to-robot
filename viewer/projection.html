@@ -26,6 +26,7 @@
     background: rgba(0, 229, 160, 0.25); color: #ffffff;
     font-size: 14px; font-weight: bold; line-height: 28px; text-align: center;
     cursor: grab; z-index: 10; user-select: none;
+    touch-action: none;   /* required for pointer-capture drags (touch/pen too) */
     box-shadow: 0 0 10px rgba(0, 229, 160, 0.8);
   }
   .handle.sel { border-color: #ffcc00; background: rgba(255,204,0,0.3);
@@ -117,17 +118,18 @@ const SRC_W = 640, SRC_H = 480;          // full-frame mask resolution
 const warp = document.getElementById("warp");
 const maskImg = document.getElementById("mask");
 const handles = [...document.querySelectorAll(".handle")];
-let corners = null;                       // 4×[x,y], normalized 0..1 of window
+function defaultCorners() {
+  return [[0.2, 0.2], [0.8, 0.2], [0.2, 0.8], [0.8, 0.8]];  // TL TR BL BR
+}
+// NEVER null — dragging must work even if the saved-corners fetch stalls
+// (e.g. the browser's per-host connection pool is exhausted by MJPEG streams).
+let corners = defaultCorners();
 let selected = -1;
 let dragging = false;                     // suppress applying our own WS echo
 
 document.title = IS_CAL ? "Projection Calibration" : "Sand Projection";
 document.body.classList.toggle("editing", IS_CAL);   // output starts clean
 document.body.classList.toggle("cal", IS_CAL);
-
-function defaultCorners() {
-  return [[0.2, 0.2], [0.8, 0.2], [0.2, 0.8], [0.8, 0.8]];  // TL TR BL BR
-}
 
 function applyWarp() {
   const W = window.innerWidth, H = window.innerHeight;
@@ -170,26 +172,31 @@ function broadcastCorners() {
 }
 
 /* ── Handle dragging ──────────────────────────────────────────────────── */
+/* Pointer events + capture: the handle keeps receiving moves even when the
+   cursor leaves the (small) window, and touch/pen input works too. */
 handles.forEach((h, i) => {
-  h.addEventListener("mousedown", (e) => {
+  h.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     selected = i;
     handles.forEach((x, j) => x.classList.toggle("sel", j === i));
     dragging = true;
+    h.setPointerCapture(e.pointerId);
     const move = (ev) => {
       corners[i] = [ev.clientX / window.innerWidth, ev.clientY / window.innerHeight];
       applyWarp();
       broadcastCorners();
     };
     const up = () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
+      h.removeEventListener("pointermove", move);
+      h.removeEventListener("pointerup", up);
+      h.removeEventListener("pointercancel", up);
       dragging = false;
       broadcastCorners();
       saveCorners();
     };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
+    h.addEventListener("pointermove", move);
+    h.addEventListener("pointerup", up);
+    h.addEventListener("pointercancel", up);
   });
 });
 

@@ -549,8 +549,18 @@ function syncEditUI(phase) {
 /* Opens /projection in its own window: drag it onto the projector display and
    press F11. The full-frame mask is only composed while this window is open,
    so there is zero projection overhead otherwise. */
+/* Chrome allows only ~6 concurrent HTTP/1.1 connections per host, and MJPEG
+   streams hold theirs open forever (this app tab alone uses 4). Opening the
+   projection windows on 127.0.0.1 instead of localhost gives them their own
+   pool, so their mask stream and corner requests never starve. */
+function projOrigin() {
+  return location.hostname === "localhost"
+    ? location.protocol + "//127.0.0.1:" + location.port
+    : "";
+}
+
 function openProjWindow(btn, url, name, feature, message) {
-  let win = window.open(url, name, feature);
+  let win = window.open(projOrigin() + url, name, feature);
   if (!win) {
     setHeaderStatus("robot", false, "Pop-up blocked — allow pop-ups for this site.");
     return null;
