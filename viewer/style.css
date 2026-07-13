@@ -242,6 +242,16 @@ main {
   border-radius: 3px;
   outline: none;
 }
+#btn-save-path {
+  padding: 2px 8px;
+  font-size: 11px;
+  background: #1a2a1e;
+  border: 1px solid #3dcc6e55;
+  color: #7ddca0;
+  border-radius: 3px;
+  cursor: pointer;
+}
+#btn-save-path:hover { background: #24402d; color: #aef0c4; }
 .legend-dot {
   width: 9px; height: 9px;
   border-radius: 50%;

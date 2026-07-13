@@ -252,6 +252,10 @@ tools without a port clash.) Closing the browser tab stops the server.
    blue dot tracks the live TCP along the strokes. A progress bar tracks execution;
    **Cancel** stops mid-stroke; failures show "Run failed: …" in the header.
 
+   **💾 Save** (execution bar) writes the toolpath — with the current
+   Speed/Offset/Safety baked in — to a timestamped folder under `paths/` (see
+   *Saving toolpaths* below).
+
 ### Test mode (no robot)
 
 Click **Test Mode (no robot)** to set a synthetic workspace and exercise the
@@ -284,6 +288,25 @@ on a real connection.
 draws on a *real* physical surface, the virtual placement must match reality —
 set the sliders to where the object sits relative to the robot base and verify
 with the preview and a slow, offset-first run.
+
+### Saving toolpaths
+
+**💾 Save** in the execution bar writes the generated toolpath to a **timestamped
+subfolder** under `paths/` (e.g. `paths/2026-07-13_14-32-08/`) containing three
+files:
+
+- **`path.script`** — a **URScript** program (native to UR controllers): `movel`
+  travels + `movep` drawing moves, with the current Speed/Offset/Safety baked in.
+  Directly runnable — verify the TCP/payload on the pendant and run slow first.
+- **`path.json`** — the strokes as 6-DOF poses **plus a full plane/frame per
+  waypoint** (`origin` + orthonormal `xaxis`/`yaxis`/`zaxis`, z = tool approach).
+  This is the format for frame/plane-guided workflows (Grasshopper, custom
+  motion) rather than bare points.
+- **`preview.png`** — the 3D Path Preview image, so the operator can identify the
+  saved path at a glance.
+
+`paths/` is gitignored. The header of each `.script` records the mode, surface,
+speed, offset, safety and stroke count.
 
 ### Projecting the mask onto the sand
 
@@ -398,6 +421,7 @@ depth_cam-to-robot/
 ├── depth_extractor.py       # Depth → groove engine: colorize, detect, filter, skeletonize
 ├── path_extractor.py        # Grooves → pixel chains → smooth → resample → TSP
 ├── surface.py               # Target mesh: STL/OBJ load, projection, normal TCP orientations
+├── path_export.py           # Save toolpath → URScript + JSON (poses+frames) + preview PNG
 ├── path_executor.py         # Background thread: retract/travel/servoL per stroke, progress
 ├── robot_controller.py      # Thread-safe ur-rtde wrapper (moveL, servoL, EE pose)
 ├── workspace.py             # Planar fallback mapping (Test Mode)
@@ -407,6 +431,7 @@ depth_cam-to-robot/
 ├── requirements.txt         # Dependencies
 ├── settings.json            # Auto-generated: saved app settings
 ├── surfaces/                # Uploaded target meshes (gitignored)
+├── paths/                   # Saved toolpaths: dated folders of .script/.json/.png (gitignored)
 ├── tests/                   # Unit + hardware-gated integration tests
 └── viewer/
     ├── index.html           # Single-page app
@@ -480,6 +505,7 @@ pytest -m integration -v
 | `test_path_extractor.py` | Chain extraction, resampling, TSP ordering, coordinate mapping |
 | `test_surface.py` | Mesh projection (flat/tilted/vertical), normal TCP orientations, offsets, placement, misses |
 | `test_path_executor.py` | Stroke sequencing, servoL streaming, uniform speed, tool-axis retracts, cancel |
+| `test_path_export.py` | URScript generation, JSON poses+frames, offset baking, timestamped bundle saving |
 | `test_robot_controller.py` | RTDE port probe, connect/disconnect, motion commands, thread safety |
 | `test_integration.py` | Live RealSense feed, full depth→groove→robot pipeline (hardware-gated) |
 

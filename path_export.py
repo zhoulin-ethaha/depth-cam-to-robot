@@ -1,0 +1,147 @@
+"""
+path_export.py — save a generated toolpath to disk in robot-native + open formats.
+
+Each save produces a timestamped subfolder under ``paths/`` containing:
+  - path.script  URScript program (movel travels + movep drawing), directly
+                 runnable on a UR controller.
+  - path.json    the same strokes as 6-DOF poses PLUS a full plane/frame per
+                 waypoint (origin + x/y/z axes), for frame-guided workflows.
+  - preview.png  the 3D Path Preview image, so an operator can identify the file.
+
+Strokes are the robot-space poses from Generate Path: a list of strokes, each a
+list of ``[x, y, z, rx, ry, rz]`` (metres, UR rotation vector). The run-time
+normal offset is baked in on save so the saved path matches what would execute.
+"""
+from __future__ import annotations
+
+import base64
+import json
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+from scipy.spatial.transform import Rotation
+
+from config import PATHS_DIR, DRAW_ACCEL, TRAVEL_ACCEL
+
+Pose = list           # [x, y, z, rx, ry, rz]
+Strokes = list        # list[list[Pose]]
+
+
+# ── geometry helpers (mirror path_executor) ──────────────────────────────────
+def _tool_axis(pose: Pose) -> np.ndarray:
+    """Outward surface normal = opposite the tool approach (−tool Z)."""
+    return -Rotation.from_rotvec(pose[3:6]).apply([0.0, 0.0, 1.0])
+
+
+def _offset_pose(pose: Pose, dist: float) -> Pose:
+    n = _tool_axis(pose)
+    return [pose[0] + dist * n[0], pose[1] + dist * n[1], pose[2] + dist * n[2],
+            pose[3], pose[4], pose[5]]
+
+
+def _retract(pose: Pose, dist: float) -> Pose:
+    return _offset_pose(pose, dist)   # retract = move outward along the normal
+
+
+# ── URScript ──────────────────────────────────────────────────────────────────
+def build_urscript(strokes: Strokes, speed: float, safety: float,
+                   header: str = "", name: str = "draw_path") -> str:
+    """
+    URScript program: for each stroke, retract-approach → start → movep through
+    the waypoints → retract. ``speed`` m/s is used for travels and drawing so the
+    motion is uniform; ``safety`` m is the retract distance along the tool axis.
+    """
+    def ps(p: Pose) -> str:
+        return "p[" + ", ".join(f"{v:.5f}" for v in p) + "]"
+
+    ta, da = TRAVEL_ACCEL, DRAW_ACCEL
+    lines = []
+    for hl in header.splitlines():
+        lines.append(f"# {hl}")
+    lines.append(f"def {name}():")
+    for si, s in enumerate(strokes):
+        if len(s) < 1:
+            continue
+        lines.append(f"  # stroke {si + 1} ({len(s)} pts)")
+        lines.append(f"  movel({ps(_retract(s[0], safety))}, a={ta:.3f}, v={speed:.4f})")
+        lines.append(f"  movel({ps(s[0])}, a={ta:.3f}, v={speed:.4f})")
+        for p in s[1:]:
+            lines.append(f"  movep({ps(p)}, a={da:.3f}, v={speed:.4f}, r=0.0005)")
+        lines.append(f"  movel({ps(_retract(s[-1], safety))}, a={ta:.3f}, v={speed:.4f})")
+    lines.append("end")
+    lines.append(f"{name}()")
+    return "\n".join(lines) + "\n"
+
+
+# ── JSON (poses + plane/frame per waypoint) ───────────────────────────────────
+def _plane(pose: Pose) -> dict:
+    """Tool frame at a waypoint: origin + orthonormal x/y/z axes (z = approach)."""
+    R = Rotation.from_rotvec(np.asarray(pose[3:6])).as_matrix()
+    return {
+        "origin": [round(float(pose[i]), 5) for i in range(3)],
+        "xaxis": [round(float(v), 6) for v in R[:, 0]],
+        "yaxis": [round(float(v), 6) for v in R[:, 1]],
+        "zaxis": [round(float(v), 6) for v in R[:, 2]],
+    }
+
+
+def build_json(strokes: Strokes, meta: dict) -> dict:
+    strokes_out = [
+        [{"pose": [round(float(v), 5) for v in p], "plane": _plane(p)} for p in s]
+        for s in strokes
+    ]
+    return {"meta": meta, "units": "metres, radians (UR pose = rotation vector)",
+            "strokes": strokes_out}
+
+
+# ── bundle ────────────────────────────────────────────────────────────────────
+def _decode_png(data_url: str | None) -> bytes | None:
+    if not data_url or "," not in data_url:
+        return None
+    try:
+        return base64.b64decode(data_url.split(",", 1)[1])
+    except Exception:
+        return None
+
+
+def save_bundle(
+    strokes: Strokes,
+    speed: float,
+    safety_m: float,
+    offset_m: float,
+    meta: dict,
+    preview_png_data_url: str | None = None,
+    base_dir: Path | None = None,
+) -> Path:
+    """Write path.script + path.json (+ preview.png) into a timestamped folder."""
+    base = Path(base_dir) if base_dir is not None else PATHS_DIR
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    folder = base / ts
+    # Guard against two saves within the same second.
+    n = 2
+    while folder.exists():
+        folder = base / f"{ts}_{n}"
+        n += 1
+    folder.mkdir(parents=True, exist_ok=True)
+
+    final = ([[_offset_pose(p, offset_m) for p in s] for s in strokes]
+             if abs(offset_m) > 1e-9 else strokes)
+
+    header = (
+        f"depth-cam-to-robot toolpath — {meta.get('saved', ts)}\n"
+        f"mode: {meta.get('mode', '?')}  surface: {meta.get('surface_name', '-')}\n"
+        f"speed: {speed:.3f} m/s  offset: {meta.get('offset_mm', 0):.1f} mm  "
+        f"safety: {meta.get('safety_mm', 0):.0f} mm  "
+        f"strokes: {meta.get('stroke_count', len(final))}\n"
+        f"Verify TCP + payload on the pendant; run at reduced speed first."
+    )
+    (folder / "path.script").write_text(
+        build_urscript(final, speed, safety_m, header=header), encoding="utf-8")
+    (folder / "path.json").write_text(
+        json.dumps(build_json(final, meta), indent=2), encoding="utf-8")
+
+    png = _decode_png(preview_png_data_url)
+    if png:
+        (folder / "preview.png").write_bytes(png)
+    return folder

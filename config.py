@@ -27,6 +27,11 @@ SURFACE_UPLOAD_URL = "/surface/upload"
 SURFACE_UNITS_TO_M = 0.001
 SURFACE_MAX_FACES  = 80000   # warn above this — browser preview gets heavy
 
+# ── Saved toolpaths ───────────────────────────────────────────────────────────
+# Save writes one timestamped subfolder per toolpath here (URScript + JSON +
+# preview image). Gitignored.
+PATHS_DIR = Path("paths")
+
 # ── Robot start position (joint angles in radians) ───────────────────────────
 START_JOINT_ANGLES = [0.0, -math.pi / 2, math.pi / 2, -math.pi / 2, -math.pi / 2, 0.0]
 START_SPEED = 0.3

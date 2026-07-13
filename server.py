@@ -45,6 +45,7 @@ class Server:
         on_retake: Optional[Callable] = None,
         on_run: Optional[Callable] = None,
         on_cancel: Optional[Callable] = None,
+        on_save_path: Optional[Callable] = None,
         on_set_groove_params: Optional[Callable] = None,
         on_set_reference: Optional[Callable] = None,
         on_clear_reference: Optional[Callable] = None,
@@ -65,6 +66,7 @@ class Server:
         self._on_retake = on_retake
         self._on_run = on_run
         self._on_cancel = on_cancel
+        self._on_save_path = on_save_path
         self._on_set_groove_params = on_set_groove_params
         self._on_set_reference = on_set_reference
         self._on_clear_reference = on_clear_reference
@@ -296,6 +298,10 @@ class Server:
             if self._on_cancel:
                 asyncio.create_task(self._on_cancel(ws))
 
+        elif msg_type == "save_path":
+            if self._on_save_path:
+                asyncio.create_task(self._on_save_path(ws, data.get("params", {})))
+
         elif msg_type == "set_groove_params":
             if self._on_set_groove_params:
                 asyncio.create_task(self._on_set_groove_params(data.get("params", {})))
@@ -425,6 +431,18 @@ class Server:
                 "rgb": self._data_url(rgb_jpg),
                 "grooves": self._data_url(grooves_jpg),
                 "mask": self._data_url(mask_jpg),
+            }))
+        except Exception:
+            pass
+
+    async def send_save_result(self, ws, success: bool, folder: str = "",
+                               error: Optional[str] = None) -> None:
+        try:
+            await ws.send_str(json.dumps({
+                "type": "save_result",
+                "success": success,
+                "folder": folder,
+                "error": error,
             }))
         except Exception:
             pass

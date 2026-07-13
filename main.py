@@ -27,6 +27,7 @@ from depth_extractor import (
 )
 from path_extractor import extract_from_edges, pixels_to_robot_coords
 from path_executor import PathExecutor
+from path_export import save_bundle
 from robot_controller import RobotController
 from server import Server
 from settings import load_settings, save_settings
@@ -510,6 +511,61 @@ async def on_cancel(ws) -> None:
     print("[executor] cancel requested")
 
 
+async def on_save_path(ws, params: dict) -> None:
+    """Save the generated toolpath as URScript + JSON + preview image."""
+    from datetime import datetime
+
+    with state_lock:
+        strokes      = shared_state.get("strokes", [])
+        surface_mode = shared_state.get("strokes_surface", False)
+        surface_info = shared_state.get("surface_info")
+        surface_pose = shared_state.get("surface_pose")
+
+    if not strokes:
+        await server.send_save_result(ws, False, error="No path to save — Generate Path first.")
+        return
+
+    params = params or {}
+
+    def _num(key, default, lo, hi):
+        try:
+            return min(max(float(params.get(key, default)), lo), hi)
+        except (TypeError, ValueError):
+            return default
+
+    speed_pct = _num("speed_pct", (DRAW_SPEED / MAX_TCP_SPEED) * 100.0, 1.0, 100.0)
+    offset_mm = _num("offset_mm", 0.0, -20.0, 200.0)
+    safety_mm = _num("safety_mm", TRAVEL_Z * 1000.0, 5.0, 300.0)
+    speed = (speed_pct / 100.0) * MAX_TCP_SPEED
+
+    meta = {
+        "saved": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "mode": "surface" if surface_mode else "planar",
+        "surface_name": (surface_info or {}).get("name") if surface_info else None,
+        "surface": surface_info,
+        "surface_pose": surface_pose if surface_mode else None,
+        "speed_mps": round(speed, 4),
+        "speed_pct": round(speed_pct, 1),
+        "offset_mm": round(offset_mm, 2),
+        "safety_mm": round(safety_mm, 1),
+        "stroke_count": len(strokes),
+        "point_count": sum(len(s) for s in strokes),
+    }
+
+    loop = asyncio.get_running_loop()
+    try:
+        folder = await loop.run_in_executor(
+            None, save_bundle, strokes, speed, safety_mm / 1000.0, offset_mm / 1000.0,
+            meta, params.get("image"),
+        )
+    except Exception as exc:
+        await server.send_save_result(ws, False, error=str(exc))
+        return
+
+    await server.send_save_result(ws, True, folder=str(folder))
+    print(f"[save] toolpath saved to {folder}")
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 server = Server(
     shared_state,
@@ -525,6 +581,7 @@ server = Server(
     on_retake=on_retake,
     on_run=on_run,
     on_cancel=on_cancel,
+    on_save_path=on_save_path,
     on_set_groove_params=on_set_groove_params,
     on_set_reference=on_set_reference,
     on_clear_reference=on_clear_reference,

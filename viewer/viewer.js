@@ -2,7 +2,8 @@
 const canvas   = document.getElementById("threejs-canvas");
 const panel    = document.getElementById("panel-3d");
 
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+// preserveDrawingBuffer lets us grab the canvas as a PNG (for Save) at any time.
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setClearColor(0x0e0e0e);
 
@@ -304,6 +305,8 @@ function connectWS() {
       handleReferenceStatus(data);
     } else if (data.type === "surface_status") {
       handleSurfaceStatus(data);
+    } else if (data.type === "save_result") {
+      handleSaveResult(data);
     } else if (data.type === "execution_update") {
       handleExecutionUpdate(data);
     }
@@ -1025,6 +1028,29 @@ document.getElementById("btn-run").addEventListener("click", () => {
 document.getElementById("exec-speed").addEventListener("input", (e) => {
   document.getElementById("exec-speed-val").textContent = e.target.value + "%";
 });
+
+/* ── Save toolpath (URScript + JSON + preview image) ────────────────────── */
+document.getElementById("btn-save-path").addEventListener("click", () => {
+  // Capture the 3D preview as a PNG. Render first so the buffer is current.
+  renderer.render(scene, camera);
+  let image = null;
+  try { image = renderer.domElement.toDataURL("image/png"); } catch (e) {}
+  sendWS({ type: "save_path", params: {
+    speed_pct: parseFloat(document.getElementById("exec-speed").value) || 5,
+    offset_mm: parseFloat(document.getElementById("exec-offset").value) || 0,
+    safety_mm: parseFloat(document.getElementById("exec-safety").value) || 50,
+    image,
+  }});
+  setHeaderStatus("robot", true, "Saving toolpath…");
+});
+
+function handleSaveResult(data) {
+  if (data.success) {
+    setHeaderStatus("robot", true, "✓ Toolpath saved to " + data.folder);
+  } else {
+    setHeaderStatus("robot", false, "Save failed: " + (data.error || "unknown error"));
+  }
+}
 
 document.getElementById("btn-cancel").addEventListener("click", () => {
   sendWS({ type: "cancel" });
