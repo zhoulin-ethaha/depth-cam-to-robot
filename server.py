@@ -85,6 +85,7 @@ class Server:
         app.router.add_get(GROOVE_PATH, self._handle_grooves)
         app.router.add_get(MASK_PATH, self._handle_mask)
         app.router.add_post(SURFACE_UPLOAD_URL, self._handle_surface_upload)
+        app.router.add_get("/status", self._handle_status)
         app.router.add_get("/projection", self._handle_projection_page)
         app.router.add_get("/depth/mask/full", self._handle_mask_full)
         app.router.add_get("/projection/corners", self._handle_corners_get)
@@ -139,6 +140,25 @@ class Server:
 
     async def _handle_mask_full(self, request: web.Request) -> web.StreamResponse:
         return await self._mjpeg_stream(request, "last_mask_full_jpg")
+
+    async def _handle_status(self, request: web.Request) -> web.Response:
+        """Compact app state for external tools (MCP): one JSON object."""
+        with self._lock:
+            s = self._state
+            out = {
+                "phase": s.get("phase", "idle"),
+                "robot_connected": s.get("robot_connected", False),
+                "camera_streaming": s.get("last_depth_color_jpg") is not None,
+                "executing": s.get("executing", False),
+                "progress": round(s.get("progress", 0.0), 3),
+                "exec_error": s.get("exec_error"),
+                "stroke_count": len(s.get("strokes", [])),
+                "strokes_surface": s.get("strokes_surface", False),
+                "surface": (s.get("surface_info") or {}).get("name"),
+                "reference_set": s.get("reference_depth") is not None,
+                "projection_clients": s.get("projection_clients", 0),
+            }
+        return web.json_response(out)
 
     async def _handle_projection_page(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(_VIEWER_DIR / "projection.html")
