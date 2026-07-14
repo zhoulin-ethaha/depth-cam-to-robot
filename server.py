@@ -75,6 +75,7 @@ class Server:
         self._on_clear_surface = on_clear_surface
         self._ws_clients: set[web.WebSocketResponse] = set()
         self._projection_clients: set[web.WebSocketResponse] = set()
+        self._tool_clients: set[web.WebSocketResponse] = set()
         self._app = self._build_app()
 
     def _build_app(self) -> web.Application:
@@ -223,10 +224,16 @@ class Server:
                 if msg.type == web.WSMsgType.TEXT:
                     await self._handle_ws_message(ws, msg.data)
         finally:
+            was_tool = ws in self._tool_clients
+            self._tool_clients.discard(ws)
             self._ws_clients.discard(ws)
             self._projection_clients.discard(ws)
             self._set_projection_count()
-            if not self._ws_clients and self._on_last_disconnect:
+            # Shutdown-on-last-disconnect tracks BROWSER clients only: an MCP
+            # tool connecting and disconnecting must not kill the app.
+            if (not was_tool
+                    and not (self._ws_clients - self._tool_clients)
+                    and self._on_last_disconnect):
                 asyncio.create_task(self._on_last_disconnect())
 
         return ws
@@ -341,6 +348,10 @@ class Server:
         elif msg_type == "clear_surface":
             if self._on_clear_surface:
                 asyncio.create_task(self._on_clear_surface())
+
+        elif msg_type == "tool_hello":
+            # External tool (MCP) socket: exempt from shutdown-on-last-disconnect.
+            self._tool_clients.add(ws)
 
         elif msg_type == "projection_hello":
             # This socket is a projection window: full-frame mask composition

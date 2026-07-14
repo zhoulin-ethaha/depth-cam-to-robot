@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "depth-cam-pipeline": {
+      "command": ".venv/Scripts/python.exe",
+      "args": ["mcp_server/server.py"]
+    }
+  }
+}

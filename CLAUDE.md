@@ -1,5 +1,12 @@
 # CLAUDE.md
 
+## Maintenance rule (apply on EVERY pipeline/feature change)
+When the pipeline, WS/HTTP API, or features change: (1) update this file —
+pipeline stages, WS message list, conventions, gotchas, test count; (2) check
+`mcp_server/server.py` — its tools wrap the WS/HTTP API, so renamed/changed
+messages, params or reply fields break them; update tools + `mcp_server/README.md`
+to match; (3) update README.md user docs. Do this in the same commit as the change.
+
 ## What this is
 depth-cam-to-robot: a browser-controlled pipeline that watches a sandbox with an
 Intel RealSense **D435i** depth camera, detects hand-raked grooves (mm-deep — raw

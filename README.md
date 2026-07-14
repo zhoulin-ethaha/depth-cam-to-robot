@@ -425,7 +425,11 @@ depth_cam-to-robot/
 ├── path_executor.py         # Background thread: retract/travel/servoL per stroke, progress
 ├── robot_controller.py      # Thread-safe ur-rtde wrapper (moveL, servoL, EE pose)
 ├── workspace.py             # Planar fallback mapping (Test Mode)
+├── reach.py                 # Reach-envelope estimate (importable without hardware)
 ├── settings.py              # Persistent JSON settings (last robot IP)
+├── CLAUDE.md                # AI-assistant repo guide (pipeline, API, gotchas)
+├── .mcp.json                # Registers the MCP pipeline server (project scope)
+├── mcp_server/              # FastMCP tools wrapping the app's HTTP/WS API
 ├── conftest.py              # Pytest shared fixtures
 ├── pytest.ini               # Test configuration
 ├── requirements.txt         # Dependencies
