@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from config import PATHS_DIR, DRAW_ACCEL, TRAVEL_ACCEL
+from config import PATHS_DIR, DRAW_ACCEL, TRAVEL_ACCEL, MOVEP_BLEND_M
 
 Pose = list           # [x, y, z, rx, ry, rz]
 Strokes = list        # list[list[Pose]]
@@ -67,7 +67,7 @@ def build_urscript(strokes: Strokes, speed: float, safety: float,
         lines.append(f"  movel({ps(_retract(s[0], safety))}, a={ta:.3f}, v={speed:.4f})")
         lines.append(f"  movel({ps(s[0])}, a={ta:.3f}, v={speed:.4f})")
         for p in s[1:]:
-            lines.append(f"  movep({ps(p)}, a={da:.3f}, v={speed:.4f}, r=0.0005)")
+            lines.append(f"  movep({ps(p)}, a={da:.3f}, v={speed:.4f}, r={MOVEP_BLEND_M:.4f})")
         lines.append(f"  movel({ps(_retract(s[-1], safety))}, a={ta:.3f}, v={speed:.4f})")
     lines.append("end")
     lines.append(f"{name}()")

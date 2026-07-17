@@ -15,10 +15,16 @@ for _stream in (sys.stdout, sys.stderr):
 
 from config import (
     HTTP_HOST, HTTP_PORT, CONTOUR_MIN_PIXELS,
+    DEPTH_LABELS_INTERVAL_MM,
     DEPTH_WIDTH, DEPTH_HEIGHT, DEPTH_FPS, DEPTH_AVERAGE_FRAMES, SURFACE_DIR,
     DRAW_Z, DRAW_SPEED, TRAVEL_Z, MAX_TCP_SPEED,
+    RESAMPLE_SPACING_MM, RESAMPLE_SPACING_MIN_MM, RESAMPLE_SPACING_MAX_MM,
+    UR_REACH_M, UR_MIN_REACH_M, MOVEP_BLEND_M,
+    PARTICIPANT_TICK_S, PARTICIPANT_CLEAR_S,
 )
+from automation import ParticipantAutomation
 from reach import reach_flags as _compute_reach_flags
+from registration import register_pose
 from camera_thread import DepthCameraThread
 from depth_extractor import (
     Crop, DepthGrooveParams, colorize_depth, encode_jpeg, process_depth,
@@ -41,6 +47,8 @@ shared_state: dict = {
     "last_mask_jpg":       None,     # thick detected-region mask (live preview)
     "last_mask_full_jpg":  None,     # full-frame mask for the projector (gated)
     "projection_clients":  0,        # connected projection windows
+    "depth_overlay_clients": 0,      # connected /depths popups (gates the labels)
+    "depth_labels":        None,     # [[u, v, mm], ...] for the depth-number overlay
     "workspace":           None,     # WorkspaceConfig | None — confirmed workspace
     "pending_workspace":   None,     # WorkspaceConfig | None — loaded from disk
     "ws_points":           {"p0": None, "px": None, "py": None},
@@ -59,6 +67,14 @@ shared_state: dict = {
     "strokes":             [],         # robot-space strokes after Generate Path
     "executing":           False,
     "progress":            0.0,
+    # ── Participant Mode (automated pipeline) ──
+    "auto_on":             False,      # Participant popup Auto toggle
+    "trigger_mm":          None,       # trigger distance (mm from camera); None = off
+    "trigger_below":       None,       # camera thread: something closer than trigger_mm?
+    "participant_status":  "Auto Off", # Auto Off|Auto On|Alerted|Sensing|Generating Paths|Actuating
+    "participant_msg":     "",         # last automation outcome/message
+    "participant_gen_params":  {},     # last crop/adjustments/spacing from Developer Mode
+    "participant_exec_params": {},     # last speed_pct/offset_mm/safety_mm from Developer Mode
 }
 state_lock = threading.Lock()
 
@@ -66,6 +82,8 @@ state_lock = threading.Lock()
 robot         = RobotController()
 camera_thread = DepthCameraThread(shared_state, state_lock)
 path_executor = PathExecutor(robot, shared_state, state_lock)
+automation    = ParticipantAutomation(
+    clear_ticks=round(PARTICIPANT_CLEAR_S / PARTICIPANT_TICK_S))
 
 
 # ── Robot connection callbacks ────────────────────────────────────────────────
@@ -180,9 +198,21 @@ async def on_set_groove_params(params: dict) -> None:
     with state_lock:
         workspace = shared_state.get("workspace")
         surface_model = shared_state.get("surface_model")
+        # Participant Mode reuses the latest Developer-Mode detection settings.
+        shared_state["participant_gen_params"].update(
+            {"crop": params.get("crop"), "adjustments": params.get("adjustments")})
     camera_thread.set_live_params(gp)
     camera_thread.set_live_crop(crop)
     camera_thread.set_scale(_mm_per_px(workspace, surface_model))
+
+
+async def on_depth_overlay_params(params: dict) -> None:
+    """Region band width (mm) for the /depths depth-number overlay popup."""
+    try:
+        interval = float(params.get("interval_mm", DEPTH_LABELS_INTERVAL_MM))
+    except (TypeError, ValueError):
+        interval = DEPTH_LABELS_INTERVAL_MM
+    camera_thread.set_depth_label_interval(min(max(interval, 1.0), 100.0))
 
 
 async def on_set_reference(ws) -> None:
@@ -266,8 +296,85 @@ async def on_clear_surface() -> None:
     print("[surface] cleared — paths map to the flat workspace again")
 
 
+# ── Corner→TCP surface registration ──────────────────────────────────────────
+# Optional touch-off placement: pick a mesh corner in the Path Preview,
+# freedrive the tool tip onto the physical corner, confirm. 1-point for now
+# (translation only — rotation stays on the sliders); registration.py already
+# solves ≥3 points (full pose) for the future multi-point flow.
+async def on_register_freedrive(ws, params: dict) -> None:
+    """Toggle freedrive for the touch-off (registration popup button)."""
+    on = bool((params or {}).get("on"))
+    with state_lock:
+        connected = shared_state.get("robot_connected", False)
+        executing = shared_state.get("executing", False)
+    if not connected:
+        await server.send_register_result(ws, False, error="Robot not connected.")
+        return
+    if executing:
+        await server.send_register_result(ws, False, error="Cannot freedrive while executing.")
+        return
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None, robot.start_freedrive if on else robot.end_freedrive)
+    with state_lock:
+        shared_state["freedrive"] = on
+    print(f"[register] freedrive {'ON — move the tool tip to the corner' if on else 'off'}")
+
+
+async def on_register_corner(ws, params: dict) -> None:
+    """Confirm the touch-off: current TCP = the selected mesh corner."""
+    try:
+        idx = int((params or {}).get("corner_index", -1))
+    except (TypeError, ValueError):
+        idx = -1
+    with state_lock:
+        model = shared_state.get("surface_model")
+        pose_d = shared_state.get("surface_pose")
+        offset = shared_state.get("surface_offset_mm", 0.0)
+        info = shared_state.get("surface_info")
+        connected = shared_state.get("robot_connected", False)
+    if model is None:
+        await server.send_register_result(ws, False, error="No surface loaded.")
+        return
+    if not connected:
+        await server.send_register_result(ws, False, error="Robot not connected.")
+        return
+    corners = model.corner_points()
+    if not 0 <= idx < len(corners):
+        await server.send_register_result(ws, False, error="No corner selected.")
+        return
+
+    loop = asyncio.get_running_loop()
+    tcp = await loop.run_in_executor(None, robot.get_ee_position)
+    try:
+        new_pose = register_pose([corners[idx]], [tcp[:3]],
+                                 SurfacePose.from_dict(pose_d))
+    except ValueError as exc:
+        await server.send_register_result(ws, False, error=str(exc))
+        return
+
+    # Touch-off done — leave freedrive so the robot holds position again.
+    await loop.run_in_executor(None, robot.end_freedrive)
+    with state_lock:
+        shared_state["surface_pose"] = new_pose.to_dict()
+        shared_state["freedrive"] = False
+
+    msg = (f"Corner {idx + 1} registered at TCP "
+           f"[{tcp[0]:.3f}, {tcp[1]:.3f}, {tcp[2]:.3f}] m — re-run Generate Path.")
+    await server.send_register_result(ws, True, message=msg, pose=new_pose.to_dict())
+    # Sliders + preview update everywhere via the normal surface_status path.
+    await server.broadcast_surface_status(
+        loaded=True, info=info, pose=new_pose.to_dict(), offset_mm=offset,
+        mesh=None, message=msg,
+    )
+    print(f"[register] {msg}")
+
+
 async def on_capture_image(ws) -> None:
     """Freeze a temporally averaged depth (+ colour) frame and enter editing."""
+    if _manual_locked(ws):
+        await server.send_capture_result(ws, False, error=_AUTO_LOCK_MSG)
+        return
     # If a projector is running, blank it and wait for the rolling depth buffer
     # to refill with projector-free frames — the average uses the PAST second,
     # so blanking without the wait would not help.
@@ -347,6 +454,9 @@ async def on_preview_adjust(ws, params: dict) -> None:
 
 async def on_generate_path(ws, params: dict) -> None:
     """Run groove extraction on the cropped depth and build the 3D path preview."""
+    if _manual_locked(ws):
+        await server.send_capture_result(ws, False, error=_AUTO_LOCK_MSG)
+        return
     with state_lock:
         workspace     = shared_state.get("workspace")
         still         = shared_state.get("captured_still")
@@ -369,25 +479,45 @@ async def on_generate_path(ws, params: dict) -> None:
     gp   = DepthGrooveParams.from_dict(params.get("adjustments"))
     mmpp = _mm_per_px(workspace, surface_model)
 
+    # Waypoint spacing in mm (Path Preview slider), clamped to the allowed range.
+    try:
+        spacing_mm = float(params.get("spacing_mm", RESAMPLE_SPACING_MM))
+    except (TypeError, ValueError):
+        spacing_mm = RESAMPLE_SPACING_MM
+    spacing_mm = min(max(spacing_mm, RESAMPLE_SPACING_MIN_MM), RESAMPLE_SPACING_MAX_MM)
+
+    with state_lock:
+        shared_state["participant_gen_params"].update(
+            {"crop": params.get("crop"), "adjustments": params.get("adjustments"),
+             "spacing_mm": spacing_mm})
+
     loop = asyncio.get_running_loop()
     try:
         processed = await loop.run_in_executor(
             None, process_depth, depth_m, valid, crop, gp, reference, mmpp
         )
         extracted = await loop.run_in_executor(
-            None, extract_from_edges, processed.grooves, CONTOUR_MIN_PIXELS, processed.origin
+            None, extract_from_edges, processed.grooves, CONTOUR_MIN_PIXELS,
+            processed.origin, spacing_mm, mmpp,
         )
     except Exception as exc:
         await server.send_capture_result(ws, False, error=str(exc))
         return
 
+    dense = extracted.strokes_dense or []
     if surface_model is not None:
         # Project the 2D drawing onto the 3D surface: waypoints lie on the mesh,
         # TCP perpendicular to it, offset applied along the surface normal.
+        # The dense skeleton is projected at ZERO offset so the white preview
+        # line lies exactly on the surface regardless of TCP offset.
         try:
             robot_strokes = await loop.run_in_executor(
                 None, surface_model.project_strokes,
                 extracted.strokes, width, height, surface_pose, surface_offset / 1000.0,
+            )
+            skeleton_strokes = await loop.run_in_executor(
+                None, surface_model.project_strokes,
+                dense, width, height, surface_pose, 0.0,
             )
         except Exception as exc:
             await server.send_capture_result(ws, False, error=f"Surface projection: {exc}")
@@ -397,12 +527,20 @@ async def on_generate_path(ws, params: dict) -> None:
         robot_strokes = pixels_to_robot_coords(
             extracted.strokes, workspace, width, height, draw_z_offset=0.0
         )
+        skeleton_strokes = pixels_to_robot_coords(
+            dense, workspace, width, height, draw_z_offset=0.0
+        )
         surface_mode = False
 
     # Convert to serialisable list-of-lists for the browser's 3D preview
     strokes_data = [
         [[round(v, 5) for v in pose] for pose in stroke]
         for stroke in robot_strokes
+    ]
+    # Skeleton needs positions only (white line) — drop orientations, round 4dp.
+    skeleton_data = [
+        [[round(pose[0], 4), round(pose[1], 4), round(pose[2], 4)] for pose in stroke]
+        for stroke in skeleton_strokes
     ]
 
     reach_flags, reach_out, reach_total = _compute_reach_flags(robot_strokes)
@@ -420,6 +558,15 @@ async def on_generate_path(ws, params: dict) -> None:
         strokes_data=strokes_data,
         reach_flags=reach_flags,
         reach_out=reach_out,
+        skeleton_data=skeleton_data,
+        # Everything the browser needs to rebuild the toolpath preview
+        # client-side when the exec-bar Offset/Safety inputs change.
+        exec_viz={
+            "blend_m": MOVEP_BLEND_M,
+            "reach_m": UR_REACH_M,
+            "min_reach_m": UR_MIN_REACH_M,
+            "spacing_mm": spacing_mm,
+        },
     )
     print(f"Generated path: {extracted.total_strokes} strokes, {extracted.total_points} points"
           + (f" — WARNING: {reach_out}/{reach_total} waypoints outside estimated reach"
@@ -439,6 +586,9 @@ async def on_retake(ws) -> None:
 
 
 async def on_run(ws, params: dict | None = None) -> None:
+    if _manual_locked(ws):
+        await server.send_capture_result(ws, False, error=_AUTO_LOCK_MSG)
+        return
     with state_lock:
         strokes      = shared_state.get("strokes", [])
         connected    = shared_state.get("robot_connected", False)
@@ -466,6 +616,10 @@ async def on_run(ws, params: dict | None = None) -> None:
     offset_mm = _num("offset_mm", 0.0, -20.0, 200.0)
     safety_mm = _num("safety_mm", TRAVEL_Z * 1000.0, 5.0, 300.0)
     draw_speed = (speed_pct / 100.0) * MAX_TCP_SPEED
+
+    with state_lock:
+        shared_state["participant_exec_params"] = {
+            "speed_pct": speed_pct, "offset_mm": offset_mm, "safety_mm": safety_mm}
 
     # Surface strokes already carry contact depth along the surface normal, so
     # the executor must not add the planar DRAW_Z on top.
@@ -514,6 +668,10 @@ async def on_save_path(ws, params: dict) -> None:
     safety_mm = _num("safety_mm", TRAVEL_Z * 1000.0, 5.0, 300.0)
     speed = (speed_pct / 100.0) * MAX_TCP_SPEED
 
+    with state_lock:
+        shared_state["participant_exec_params"] = {
+            "speed_pct": speed_pct, "offset_mm": offset_mm, "safety_mm": safety_mm}
+
     meta = {
         "saved": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "mode": "surface" if surface_mode else "planar",
@@ -542,6 +700,178 @@ async def on_save_path(ws, params: dict) -> None:
     print(f"[save] toolpath saved to {folder}")
 
 
+# ── Participant Mode (automated pipeline) ────────────────────────────────────
+# The Auto toggle + trigger threshold come from the ⧉ Participant popup; the
+# camera thread flags frames with anything closer than the trigger
+# (shared_state["trigger_below"]). The loop below feeds that flag to the state
+# machine; on an Alerted→clear edge the pipeline runs, reusing the SAME
+# handlers as the Developer-Mode buttons via server.broadcast_ws() — open
+# Developer windows see every step live. While Auto is ON, manual
+# capture/generate/run calls are refused (_manual_locked) and greyed out.
+def _sync_participant_state() -> None:
+    with state_lock:
+        shared_state["participant_status"] = automation.status
+        shared_state["participant_msg"] = automation.message
+
+
+_TRIGGER_HINT = "Enter a trigger distance (mm) to arm."
+
+
+def _update_trigger_hint() -> None:
+    """Auto ON without a trigger distance can never fire — say so in the popup.
+    Only ever writes/clears the hint, so pipeline outcome messages survive."""
+    if automation.busy:
+        return
+    with state_lock:
+        mm = shared_state.get("trigger_mm")
+    if automation.enabled and mm is None:
+        automation.message = _TRIGGER_HINT
+    elif automation.message == _TRIGGER_HINT:
+        automation.message = ""
+
+
+def _manual_locked(ws) -> bool:
+    """True when Auto is ON and this pipeline call is NOT from the automation
+    itself (which uses the broadcast shim) — manual controls are locked out."""
+    with state_lock:
+        auto = bool(shared_state.get("auto_on"))
+    return auto and ws is not server.broadcast_ws()
+
+
+_AUTO_LOCK_MSG = "Automation is ON — switch it off in the Participant window for manual control."
+
+
+async def on_set_automation(params: dict) -> None:
+    """Participant popup Auto toggle."""
+    on = bool((params or {}).get("on"))
+    with state_lock:
+        shared_state["auto_on"] = on
+    automation.set_enabled(on)
+    _update_trigger_hint()
+    _sync_participant_state()
+    print(f"[participant] automation {'ON' if on else 'OFF'}")
+
+
+async def on_set_exec_params(params: dict) -> None:
+    """
+    Live sync of the Developer exec-bar values (debounced by the browser) so
+    Participant Mode always uses what Developer Mode currently shows — no Run
+    or Save Path needed to 'commit' them. Same clamps as on_run/on_save_path.
+    """
+    params = params or {}
+
+    def _num(key, default, lo, hi):
+        try:
+            return min(max(float(params.get(key, default)), lo), hi)
+        except (TypeError, ValueError):
+            return default
+
+    speed_pct = _num("speed_pct", (DRAW_SPEED / MAX_TCP_SPEED) * 100.0, 1.0, 100.0)
+    offset_mm = _num("offset_mm", 0.0, -20.0, 200.0)
+    safety_mm = _num("safety_mm", TRAVEL_Z * 1000.0, 5.0, 300.0)
+    spacing_mm = _num("spacing_mm", RESAMPLE_SPACING_MM,
+                      RESAMPLE_SPACING_MIN_MM, RESAMPLE_SPACING_MAX_MM)
+    with state_lock:
+        shared_state["participant_exec_params"] = {
+            "speed_pct": speed_pct, "offset_mm": offset_mm, "safety_mm": safety_mm}
+        shared_state["participant_gen_params"]["spacing_mm"] = spacing_mm
+
+
+async def on_set_trigger(params: dict) -> None:
+    """Set (or clear with null/empty) the Participant-Mode trigger distance."""
+    raw = (params or {}).get("threshold_mm")
+    mm = None
+    try:
+        if raw is not None and str(raw).strip() != "":
+            mm = min(max(float(raw), 50.0), 5000.0)
+    except (TypeError, ValueError):
+        mm = None
+    camera_thread.set_trigger_threshold(mm)
+    with state_lock:
+        shared_state["trigger_mm"] = mm
+        if mm is None:
+            shared_state["trigger_below"] = None
+    _update_trigger_hint()
+    _sync_participant_state()
+    print(f"[participant] trigger {'set to %.0f mm' % mm if mm is not None else 'off'}")
+
+
+async def _participant_pipeline() -> None:
+    """One automated run: Sensing → Generating Paths → Actuating (save + run)."""
+    bws = server.broadcast_ws()
+    try:
+        with state_lock:
+            ready = (shared_state.get("surface_model") is not None
+                     or shared_state.get("workspace") is not None)
+        if not ready:
+            automation.finish("Not ready — load a target surface (or Test Mode) in Developer Mode.")
+            return
+
+        # ── Sensing: the averaged capture uses the PAST second of frames, so
+        # wait for the buffer to refill with hand-free frames first.
+        _sync_participant_state()
+        await asyncio.sleep(DEPTH_AVERAGE_FRAMES / DEPTH_FPS + 0.3)
+        await on_capture_image(bws)
+        with state_lock:
+            captured = shared_state.get("captured_still") is not None
+        if not captured:
+            automation.finish("Capture failed — no depth frame.")
+            return
+
+        # ── Generating Paths: latest Developer-Mode detection/spacing settings.
+        automation.stage("Generating Paths")
+        _sync_participant_state()
+        with state_lock:
+            gen_params = dict(shared_state.get("participant_gen_params") or {})
+        await on_generate_path(bws, gen_params)
+        with state_lock:
+            strokes = shared_state.get("strokes", [])
+            connected = shared_state.get("robot_connected", False)
+        if not strokes:
+            automation.finish("No grooves detected — nothing to draw.")
+            return
+
+        # ── Actuating: save the bundle first (always), then run on the robot.
+        automation.stage("Actuating")
+        _sync_participant_state()
+        with state_lock:
+            exec_params = dict(shared_state.get("participant_exec_params") or {})
+        await on_save_path(bws, exec_params)
+        if not connected:
+            automation.finish("Path saved — robot not connected, run skipped.")
+            return
+        await on_run(bws, exec_params)
+        await asyncio.sleep(0.5)                # let the executor thread spin up
+        while path_executor.running:
+            await asyncio.sleep(0.2)
+        with state_lock:
+            err = shared_state.get("exec_error")
+        automation.finish(f"Run failed: {err}" if err else "Done — path drawn and saved.")
+    except Exception as exc:
+        automation.finish(f"Automation error: {exc}")
+        print(f"[participant] pipeline error: {exc}")
+    finally:
+        _sync_participant_state()
+        print(f"[participant] {automation.message or 'pipeline finished'}")
+
+
+async def _participant_loop() -> None:
+    """Poll the camera trigger flag and drive the automation state machine."""
+    while True:
+        await asyncio.sleep(PARTICIPANT_TICK_S)
+        with state_lock:
+            below = shared_state.get("trigger_below")
+            executing = shared_state.get("executing", False)
+        # A manually-started run owns the robot — don't trigger on top of it.
+        if executing and not automation.busy:
+            continue
+        prev = (automation.status, automation.message)
+        if automation.tick(below):
+            asyncio.create_task(_participant_pipeline())
+        if (automation.status, automation.message) != prev:
+            _sync_participant_state()
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 server = Server(
     shared_state,
@@ -564,6 +894,12 @@ server = Server(
     on_surface_upload=on_surface_upload,
     on_set_surface_pose=on_set_surface_pose,
     on_clear_surface=on_clear_surface,
+    on_depth_overlay_params=on_depth_overlay_params,
+    on_register_freedrive=on_register_freedrive,
+    on_register_corner=on_register_corner,
+    on_set_trigger=on_set_trigger,
+    on_set_automation=on_set_automation,
+    on_set_exec_params=on_set_exec_params,
 )
 
 # Camera starts immediately so both MJPEG feeds are live from the moment you open the browser
@@ -598,6 +934,7 @@ async def _open_browser() -> None:
 
 async def _main() -> None:
     asyncio.create_task(_open_browser())
+    asyncio.create_task(_participant_loop())
     await server.start()
 
 

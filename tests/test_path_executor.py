@@ -75,9 +75,10 @@ class TestPathExecutorLifecycle:
         ex.start(strokes)
         ex.start(strokes)  # second call must be no-op
         _wait_done(ex)
-        # lift + travel + final pen-up = 3 move_to calls; draw goes via servo_to
-        assert robot.move_to.call_count == 3
-        assert robot.stop_servo.call_count >= 1
+        # lift + travel + land-on-start + final pen-up = 4 move_to calls;
+        # the rest of the stroke goes via one movep (move_process_path)
+        assert robot.move_to.call_count == 4
+        assert robot.move_process_path.call_count == 1
 
     def test_not_running_after_completion(self, executor):
         ex, robot, state = executor
@@ -96,10 +97,10 @@ class TestMoveSequence:
         ex, robot, state, strokes = one_stroke
         ex.start(strokes)
         _wait_done(ex)
-        # lift + travel + final pen-up = 3 move_to calls; draw goes via servo_to
-        assert robot.move_to.call_count == 3
-        assert robot.servo_to.call_count >= 1
-        assert robot.stop_servo.call_count >= 1
+        # lift + travel + land-on-start + final pen-up = 4 move_to calls;
+        # the remaining waypoints go via one movep (move_process_path)
+        assert robot.move_to.call_count == 4
+        assert robot.move_process_path.call_count == 1
 
     def test_lift_move_uses_current_ee_z(self, one_stroke):
         ex, robot, state, strokes = one_stroke
@@ -147,10 +148,14 @@ class TestMoveSequence:
         ex, robot, state, strokes = one_stroke
         ex.start(strokes)
         _wait_done(ex)
-        # All waypoints in _make_stroke have z=0; every servo_to call must use z = DRAW_Z
-        for call in robot.servo_to.call_args_list:
-            pose = call[0][0]
-            assert abs(pose[2] - DRAW_Z) < 1e-9
+        # All waypoints in _make_stroke have z=0, so every drawn waypoint must
+        # carry z = DRAW_Z: the landing move_to (index 2) and every waypoint
+        # passed to move_process_path.
+        land_pose = robot.move_to.call_args_list[2][0][0]
+        assert abs(land_pose[2] - DRAW_Z) < 1e-9
+        waypoints = robot.move_process_path.call_args_list[0][0][0]
+        for wp in waypoints:
+            assert abs(wp[2] - DRAW_Z) < 1e-9
 
     def test_lift_and_travel_use_uniform_draw_speed(self, one_stroke):
         # The Speed setting governs the WHOLE actuation: lift/travel moves run
@@ -165,12 +170,15 @@ class TestMoveSequence:
             assert speed == 0.2
             assert accel == TRAVEL_ACCEL
 
-    def test_draw_calls_servo_for_each_waypoint(self, one_stroke):
+    def test_draw_passes_remaining_waypoints_to_movep(self, one_stroke):
         ex, robot, state, strokes = one_stroke
         ex.start(strokes)
         _wait_done(ex)
-        # servoL streaming produces at least one call per input waypoint
-        assert robot.servo_to.call_count >= len(strokes[0])
+        # First waypoint is landed on via move_to; the rest go through one
+        # movep process path.
+        robot.move_process_path.assert_called_once()
+        waypoints = robot.move_process_path.call_args_list[0][0][0]
+        assert len(waypoints) == len(strokes[0]) - 1
 
     def test_final_pen_up_after_last_stroke(self, one_stroke):
         ex, robot, state, strokes = one_stroke
@@ -242,17 +250,17 @@ class TestStateTransitions:
             with lock:
                 progress_snapshots.append(state["progress"])
 
-        def recording_servo(pose):
+        def recording_movep(*args, **kwargs):
             with lock:
                 progress_snapshots.append(state["progress"])
 
         mock_robot.move_to.side_effect = recording_move
-        mock_robot.servo_to.side_effect = recording_servo
+        mock_robot.move_process_path.side_effect = recording_movep
         ex = PathExecutor(mock_robot, state, lock)
         strokes = [_make_stroke(2)]
         ex.start(strokes)
         _wait_done(ex)
-        # lift + travel (2 move_to) + many servo_to + final pen-up (1 move_to) = many snapshots
+        # lift + travel + land (3 move_to) + movep + final pen-up (1 move_to)
         assert len(progress_snapshots) >= 4
         for i in range(1, len(progress_snapshots)):
             assert progress_snapshots[i] >= progress_snapshots[i - 1]
@@ -332,7 +340,8 @@ class TestKnownBehaviors:
         _wait_done(ex)
 
         calls = mock_robot.move_to.call_args_list
-        # The lift at the start of stroke2 is after: lift(s1) + travel(s1) + move_path(s1) = index 2
-        lift_stroke2 = calls[2][0][0]
+        # The lift at the start of stroke2 comes after stroke1's
+        # lift + travel + land-on-start move_to calls = index 3
+        lift_stroke2 = calls[3][0][0]
         expected_cz = stroke1[-1][2] + DRAW_Z  # = 0.1 + (-0.010) = 0.09
         assert abs(lift_stroke2[2] - (expected_cz + TRAVEL_Z)) < 1e-9

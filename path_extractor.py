@@ -10,18 +10,33 @@ from config import (
     CONTOUR_MIN_PIXELS, RESAMPLE_SPACING_MM, TOOL_ORIENTATION,
 )
 
+# Fallback spacing (pixels) used only when no mm-per-pixel scale is available
+# (e.g. Test Mode before a workspace/surface is set). Normally spacing is mm.
+_FALLBACK_SPACING_PX = 10.0
+
+# Dense resample spacing for the skeleton preview line (the white on-surface
+# curve in the 3D view). Much finer than the waypoint spacing so it hugs the
+# surface; never used for robot motion.
+_SKELETON_SPACING_MM = 2.0
+_SKELETON_FALLBACK_PX = 2.0
+
 
 @dataclass
 class ExtractedPath:
     strokes: list[list[tuple[float, float]]]  # pixel-coordinate strokes, ordered for efficient travel
     total_strokes: int
     total_points: int
+    # Densely resampled copy of the same strokes (~2 mm spacing) for the white
+    # on-surface skeleton line in the 3D preview. Not used for robot motion.
+    strokes_dense: list[list[tuple[float, float]]] = None
 
 
 def extract_from_edges(
     edges: np.ndarray,
     min_contour_pixels: int = CONTOUR_MIN_PIXELS,
     offset: tuple[int, int] = (0, 0),
+    spacing_mm: float = RESAMPLE_SPACING_MM,
+    mm_per_px: Optional[float] = None,
 ) -> ExtractedPath:
     """
     Turn a binary groove image (1-px-wide centrelines, white on black) into
@@ -31,27 +46,42 @@ def extract_from_edges(
     processing. ``offset`` (x0, y0) shifts every point back into full-frame pixel
     coordinates when the grooves were computed on a cropped sub-image, so the
     workspace mapping in pixels_to_robot_coords stays correct.
+
+    ``spacing_mm`` is the target spacing between waypoints in millimetres;
+    ``mm_per_px`` converts it into the pixel spacing used for resampling. When no
+    scale is available (mm_per_px is None or non-positive) it falls back to a
+    fixed pixel spacing so Test Mode still produces a path.
     """
     strokes = _chains_from_edges(edges, min_contour_pixels)
 
     if not strokes:
-        return ExtractedPath(strokes=[], total_strokes=0, total_points=0)
+        return ExtractedPath(strokes=[], total_strokes=0, total_points=0,
+                             strokes_dense=[])
 
-    # Compute pixel spacing from workspace config if available — fall back to 10px
-    spacing_px = 10.0
+    # Convert the mm spacings into pixels using the scene scale; fall back to
+    # fixed pixel spacings when no mm-per-pixel is known.
+    if mm_per_px and mm_per_px > 0:
+        spacing_px = max(spacing_mm / mm_per_px, 1.0)
+        dense_px   = max(_SKELETON_SPACING_MM / mm_per_px, 1.0)
+    else:
+        spacing_px = _FALLBACK_SPACING_PX
+        dense_px   = _SKELETON_FALLBACK_PX
     strokes_smoothed  = [smooth_stroke(s) for s in strokes]
     strokes_resampled = [resample_stroke(s, spacing_px) for s in strokes_smoothed]
     strokes_ordered   = _order_strokes(strokes_resampled)
+    strokes_dense     = [resample_stroke(s, dense_px) for s in strokes_smoothed]
 
     ox, oy = offset
     if ox or oy:
         strokes_ordered = [[(x + ox, y + oy) for x, y in s] for s in strokes_ordered]
+        strokes_dense   = [[(x + ox, y + oy) for x, y in s] for s in strokes_dense]
 
     total_pts = sum(len(s) for s in strokes_ordered)
     return ExtractedPath(
         strokes=strokes_ordered,
         total_strokes=len(strokes_ordered),
         total_points=total_pts,
+        strokes_dense=strokes_dense,
     )
 
 

@@ -1,10 +1,9 @@
 import socket
 import threading
+import time
 from typing import Optional
 
 from config import (
-    RTDE_FREQUENCY, SERVO_LOOKAHEAD_TIME, SERVO_GAIN,
-    SERVO_VELOCITY_DEFAULT, SERVO_ACCELERATION,
     START_JOINT_ANGLES, START_SPEED, START_ACCEL,
 )
 
@@ -74,10 +73,6 @@ class RobotController:
             except Exception:
                 pass
             try:
-                self._rtde_c.servoStop()
-            except Exception:
-                pass
-            try:
                 self._rtde_c.disconnect()
             except Exception:
                 pass
@@ -103,46 +98,68 @@ class RobotController:
                 return
             self._rtde_c.moveL(pose_vec, speed, accel)
 
-    def move_path(self, path: list[list[float]]) -> None:
-        """Blocking movePath. Each entry: [x,y,z,rx,ry,rz,speed,accel,blend]."""
+    def move_process_path(self, waypoints: list[list[float]], speed: float,
+                          accel: float, blend: float,
+                          cancel_event: Optional[threading.Event] = None,
+                          poll_dt: float = 0.02) -> None:
+        """
+        Draw a stroke as a blended process move — URScript ``movep`` — matching
+        the saved path.script actuation exactly (linear, constant tool speed,
+        corner-blended). The path is launched asynchronously on the controller
+        and polled to completion so the lock is released between checks: the EE
+        poller keeps updating and cancel() stays responsive mid-stroke.
+
+        ``blend`` (m) is applied at every waypoint except the last (0.0) and must
+        be smaller than half the spacing between neighbouring waypoints, or the
+        controller rejects the path. Each waypoint is [x, y, z, rx, ry, rz].
+        """
+        from rtde_control import Path, PathEntry
+
+        if not waypoints:
+            return
+
         with self._lock:
             if self._rtde_c is None:
                 return
-            self._rtde_c.movePath(path)
+            path = Path()
+            last = len(waypoints) - 1
+            for i, p in enumerate(waypoints):
+                r = 0.0 if i == last else blend
+                path.addEntry(PathEntry(
+                    PathEntry.MoveP, PathEntry.PositionTcpPose,
+                    [p[0], p[1], p[2], p[3], p[4], p[5], speed, accel, r],
+                ))
+            self._rtde_c.movePath(path, True)   # asynchronous — returns at once
+
+        # Poll to completion outside the lock. getAsyncOperationProgress() is
+        # >= 0 while the move runs and negative once it finishes — but it can
+        # still read negative for a moment right after launch, so only trust a
+        # negative reading once the op has been seen running (or after a short
+        # grace period, which also covers very short paths finishing between
+        # polls).
+        started = time.monotonic()
+        seen_running = False
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                self.stop_motion()
+                return
+            with self._lock:
+                if self._rtde_c is None:
+                    return
+                progress = self._rtde_c.getAsyncOperationProgress()
+            if progress >= 0:
+                seen_running = True
+            elif seen_running or (time.monotonic() - started) > 0.5:
+                return
+            time.sleep(poll_dt)
 
     def stop_motion(self) -> None:
-        """Stop any in-progress moveL or servoL."""
+        """Stop any in-progress moveL or movePath (movep) motion."""
         with self._lock:
             if self._rtde_c is None:
                 return
             try:
                 self._rtde_c.stopL(2.0)
-            except Exception:
-                pass
-            try:
-                self._rtde_c.servoStop()
-            except Exception:
-                pass
-
-    def servo_to(self, pose_vec: list[float], velocity: float = SERVO_VELOCITY_DEFAULT) -> None:
-        with self._lock:
-            if self._rtde_c is None:
-                return
-            self._rtde_c.servoL(
-                pose_vec,
-                velocity,
-                SERVO_ACCELERATION,
-                1.0 / RTDE_FREQUENCY,
-                SERVO_LOOKAHEAD_TIME,
-                SERVO_GAIN,
-            )
-
-    def stop_servo(self) -> None:
-        with self._lock:
-            if self._rtde_c is None:
-                return
-            try:
-                self._rtde_c.servoStop()
             except Exception:
                 pass
 

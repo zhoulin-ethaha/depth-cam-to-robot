@@ -212,3 +212,11 @@ class TestLoadAndPayload:
         assert len(payload["vertices"]) % 3 == 0
         assert len(payload["faces"]) % 3 == 0
         assert max(payload["faces"]) < len(payload["vertices"]) // 3
+
+    def test_mesh_payload_corners_match_model(self):
+        # Registration markers in the browser must use the same numbering as
+        # the server-side solve — both come from corner_points().
+        model = _flat_plane()
+        payload = model.mesh_payload()
+        assert payload["corners"] == model.corner_points()
+        assert len(payload["corners"]) == 4          # flat sheet → 4 corners

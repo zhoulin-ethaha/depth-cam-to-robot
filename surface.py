@@ -172,11 +172,20 @@ class SurfaceModel:
         return (rw / frame_width) * 1000.0
 
     def mesh_payload(self) -> dict:
-        """Vertices/faces in the LOCAL frame; the browser applies the pose matrix."""
+        """Vertices/faces in the LOCAL frame; the browser applies the pose matrix.
+        ``corners`` are the numbered touch-off candidates for registration —
+        same indices as registration.corner_points() uses server-side."""
+        from registration import corner_points
         return {
             "vertices": np.round(self.mesh.vertices, 5).ravel().tolist(),
             "faces": self.mesh.faces.ravel().tolist(),
+            "corners": corner_points(self.mesh.vertices),
         }
+
+    def corner_points(self) -> list[list[float]]:
+        """Touch-off corner candidates in the LOCAL frame (see registration.py)."""
+        from registration import corner_points
+        return corner_points(self.mesh.vertices)
 
     # ── projection ─────────────────────────────────────────────────────────
     def project_strokes(

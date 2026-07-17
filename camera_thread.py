@@ -7,9 +7,11 @@ import numpy as np
 
 from config import (
     DEPTH_WIDTH, DEPTH_HEIGHT, DEPTH_FPS, DEPTH_AVERAGE_FRAMES,
+    DEPTH_LABELS_EVERY, DEPTH_LABELS_INTERVAL_MM,
 )
 from depth_extractor import (
-    Crop, DepthGrooveParams, colorize_depth, grooves_and_mask, encode_jpeg,
+    Crop, DepthGrooveParams, colorize_depth, depth_below_threshold,
+    depth_region_labels, grooves_and_mask, encode_jpeg,
 )
 
 # How often (in frames) to recompute the live groove preview. Groove detection
@@ -51,6 +53,8 @@ class DepthCameraThread:
         self._live_crop = Crop()
         self._reference: Optional[np.ndarray] = None   # baseline depth for subtraction
         self._mm_per_px: Optional[float] = None        # workspace scale for mm filters
+        self._label_interval_mm = DEPTH_LABELS_INTERVAL_MM  # depth-number overlay band
+        self._trigger_mm: Optional[float] = None       # Participant-Mode trigger threshold
 
     @property
     def running(self) -> bool:
@@ -86,6 +90,14 @@ class DepthCameraThread:
     def set_scale(self, mm_per_px: Optional[float]) -> None:
         """Set the workspace scale so the live mm-based width/length filters work."""
         self._mm_per_px = mm_per_px
+
+    def set_depth_label_interval(self, interval_mm: float) -> None:
+        """Band width (mm) for the depth-number overlay's iso-depth regions."""
+        self._label_interval_mm = interval_mm
+
+    def set_trigger_threshold(self, mm: Optional[float]) -> None:
+        """Participant-Mode trigger distance (mm from camera); None disables."""
+        self._trigger_mm = mm
 
     def capture_frame(self) -> Optional[tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]]:
         """
@@ -190,7 +202,26 @@ class DepthCameraThread:
                             last_mask_full_jpg = fj
                     else:
                         last_mask_full_jpg = None
+
+                # Depth-number overlay labels: computed ONLY while a /depths
+                # popup is connected (zero overhead otherwise), throttled
+                # harder than the groove preview — it's a reference display.
+                if frame_i % DEPTH_LABELS_EVERY == 0:
+                    with self._state_lock:
+                        overlay_on = self._state.get("depth_overlay_clients", 0) > 0
+                    labels = (depth_region_labels(z, ok, self._label_interval_mm)
+                              if overlay_on else None)
+                    with self._state_lock:
+                        self._state["depth_labels"] = labels
                 frame_i += 1
+
+                # Participant-Mode trigger: is anything closer than the
+                # threshold? One vectorized compare per frame — cheap enough
+                # to run unthrottled so the automation reacts promptly.
+                thr = self._trigger_mm
+                trigger_below = depth_below_threshold(z, ok, thr) if thr is not None else None
+                with self._state_lock:
+                    self._state["trigger_below"] = trigger_below
 
                 if ok_color:
                     with self._state_lock:
@@ -213,6 +244,8 @@ class DepthCameraThread:
                 self._state["last_groove_jpg"] = None
                 self._state["last_mask_jpg"] = None
                 self._state["last_mask_full_jpg"] = None
+                self._state["depth_labels"] = None
+                self._state["trigger_below"] = None
             with self._frame_lock:
                 self._buffer.clear()
                 self._last_rgb = None

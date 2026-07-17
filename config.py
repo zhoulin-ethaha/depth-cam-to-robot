@@ -32,17 +32,36 @@ SURFACE_MAX_FACES  = 80000   # warn above this — browser preview gets heavy
 # preview image). Gitignored.
 PATHS_DIR = Path("paths")
 
+# ── Depth-number overlay (reference popup on the Depth viewport) ─────────────
+# The /depths popup shows the live depth feed with the absolute distance (mm
+# from the camera) written at the centre of each iso-depth region. Regions are
+# depth bands `interval_mm` wide (popup slider); labels are computed at half
+# resolution, only while the popup is open, throttled like the groove preview.
+DEPTH_LABELS_EVERY       = 8      # compute every Nth camera frame (~3.75 Hz)
+DEPTH_LABELS_INTERVAL_MM = 10.0   # default band width (popup slider, mm)
+DEPTH_LABELS_MIN_AREA_PX = 60     # min region area in half-res pixels
+DEPTH_LABELS_MAX         = 150    # cap on labels per frame (declutter + cost)
+
+# ── Participant Mode (automated pipeline) ─────────────────────────────────────
+# The ⧉ Participant Mode popup (/depths) runs capture → generate → save+run
+# automatically while its Auto toggle is ON. The trigger watches the live depth
+# frame: when at least TRIGGER_MIN_AREA_PX valid pixels are CLOSER to the camera
+# than the user-entered threshold (mm), status becomes "Alerted"; once the frame
+# stays clear for PARTICIPANT_CLEAR_S, the pipeline starts. The area minimum
+# keeps single-pixel sensor noise from firing.
+TRIGGER_MIN_AREA_PX = 150    # valid pixels below threshold that count as "something in frame"
+PARTICIPANT_TICK_S  = 0.1    # automation poll interval (s)
+PARTICIPANT_CLEAR_S = 1.0    # frame must stay clear this long before triggering
+
+# ── Detection-parameter presets ───────────────────────────────────────────────
+# The Save/Load buttons in the Detection Parameters panel write one timestamped
+# JSON per preset here (just the slider values + detect mode). Gitignored.
+PRESETS_DIR = Path("presets")
+
 # ── Robot start position (joint angles in radians) ───────────────────────────
 START_JOINT_ANGLES = [0.0, -math.pi / 2, math.pi / 2, -math.pi / 2, -math.pi / 2, 0.0]
 START_SPEED = 0.3
 START_ACCEL = 0.5
-
-# ── RTDE servo parameters ─────────────────────────────────────────────────────
-RTDE_FREQUENCY       = 125
-SERVO_LOOKAHEAD_TIME = 0.1
-SERVO_GAIN           = 300
-SERVO_VELOCITY_DEFAULT = 0.10
-SERVO_ACCELERATION   = 0.5
 
 # ── Depth camera (Intel RealSense D435i) ──────────────────────────────────────
 # The D435i streams metric depth directly, so grooves raked into sand — a few-mm
@@ -67,8 +86,11 @@ GROOVE_MIN_BLOB_PX      = 40     # discard connected specks smaller than this
 GROOVE_DETECT           = "valley"  # "valley"=grooves, "ridge"=raised lines, "band"=iso-depth
 
 # ── Path extraction ───────────────────────────────────────────────────────────
-CONTOUR_MIN_PIXELS  = 20   # discard contours shorter than this many pixels
-RESAMPLE_SPACING_MM = 5.0  # target spacing between robot waypoints in mm
+CONTOUR_MIN_PIXELS  = 20    # discard contours shorter than this many pixels
+RESAMPLE_SPACING_MM = 10.0  # default spacing between robot waypoints in mm (the
+                            # Path Preview "Spacing" slider overrides this per run)
+RESAMPLE_SPACING_MIN_MM = 10.0   # slider lower bound
+RESAMPLE_SPACING_MAX_MM = 100.0  # slider upper bound
 
 # ── Robot drawing ─────────────────────────────────────────────────────────────
 DRAW_Z           = -0.010  # m — pen contact (negative = below workspace surface origin)
@@ -86,6 +108,11 @@ DRAW_ACCEL       = 0.3     # m/s²
 TRAVEL_SPEED     = 0.15    # m/s during pen-up travel moves
 TRAVEL_ACCEL     = 0.5     # m/s²
 TOOL_ORIENTATION = [0.0, math.pi, 0.0]  # tool-down [rx, ry, rz]
+
+# Blend radius (m) at each movep waypoint. Shared by the live executor and the
+# saved URScript export so live drawing and a saved-file run trace identically.
+# Must stay smaller than half the waypoint spacing or the controller rejects it.
+MOVEP_BLEND_M    = 0.0005  # 0.5 mm
 
 # ── Visualization ─────────────────────────────────────────────────────────────
 VIS_INTERVAL = 0.05  # seconds between WebSocket state broadcasts

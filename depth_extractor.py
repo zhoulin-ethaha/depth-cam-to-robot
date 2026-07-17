@@ -34,6 +34,7 @@ from config import (
     GROOVE_SMOOTH_SIGMA_PX, GROOVE_DETREND_SIGMA_PX, GROOVE_DEPTH_MM,
     GROOVE_MIN_BLOB_PX, GROOVE_DETECT, DEPTH_COLOR_NEAR_M, DEPTH_COLOR_FAR_M,
     DEPTH_FPS, DEPTH_WIDTH, DEPTH_HEIGHT, DEPTH_AVERAGE_FRAMES,
+    DEPTH_LABELS_MIN_AREA_PX, DEPTH_LABELS_MAX, TRIGGER_MIN_AREA_PX,
 )
 
 try:
@@ -333,6 +334,69 @@ def colorize_depth(
     color = cv2.applyColorMap((norm * 255.0).astype(np.uint8), cv2.COLORMAP_TURBO)
     color[~valid] = (0, 0, 0)
     return color
+
+
+def depth_below_threshold(
+    depth_m: np.ndarray,
+    valid: np.ndarray,
+    threshold_mm: float | None,
+    min_px: int = TRIGGER_MIN_AREA_PX,
+) -> bool:
+    """
+    Participant-mode presence trigger: True when at least ``min_px`` valid
+    pixels are CLOSER to the camera than ``threshold_mm`` (e.g. a hand raking
+    above the sand). The area minimum keeps sensor speckle from firing.
+    """
+    if threshold_mm is None or threshold_mm <= 0:
+        return False
+    below = valid & (depth_m < threshold_mm / 1000.0)
+    return int(np.count_nonzero(below)) >= int(min_px)
+
+
+def depth_region_labels(
+    depth_m: np.ndarray,
+    valid: np.ndarray,
+    interval_mm: float,
+    min_area_px: int = DEPTH_LABELS_MIN_AREA_PX,
+    max_labels: int = DEPTH_LABELS_MAX,
+) -> list[list[float]]:
+    """
+    Labels for the depth-number overlay popup: quantize depth into bands
+    ``interval_mm`` wide, find each band's connected regions, and return one
+    ``[u, v, depth_mm]`` per region at its centroid (u/v in FULL-frame pixels,
+    depth_mm = the band's centre distance from the camera).
+
+    Reference display only — never feeds path generation. Runs at half
+    resolution for speed; regions smaller than ``min_area_px`` (half-res px)
+    are dropped, biggest bands first, capped at ``max_labels``.
+    """
+    interval_mm = max(float(interval_mm), 0.5)
+    z = np.asarray(depth_m, dtype=np.float32)[::2, ::2]
+    ok = np.asarray(valid, dtype=bool)[::2, ::2]
+    if not np.any(ok):
+        return []
+
+    # Band index per pixel (0 is reserved for invalid).
+    q = np.zeros(z.shape, np.int32)
+    q[ok] = np.rint((z[ok] * 1000.0) / interval_mm).astype(np.int32) + 1
+
+    vals, counts = np.unique(q[ok], return_counts=True)
+    order = np.argsort(counts)[::-1]                 # biggest bands first
+    out: list[list[float]] = []
+    for i in order:
+        if counts[i] < min_area_px:
+            break                                    # sorted: rest are smaller
+        band = (q == vals[i]).astype(np.uint8)
+        n, _lab, stats, cents = cv2.connectedComponentsWithStats(band, connectivity=4)
+        for j in range(1, n):
+            if stats[j, cv2.CC_STAT_AREA] < min_area_px:
+                continue
+            u, v = cents[j]
+            out.append([int(u * 2), int(v * 2),
+                        round(float((vals[i] - 1) * interval_mm), 1)])
+            if len(out) >= max_labels:
+                return out
+    return out
 
 
 @dataclass

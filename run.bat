@@ -9,7 +9,7 @@ chcp 65001 >nul
 REM Move to the folder this script lives in, so it works from anywhere.
 cd /d "%~dp0"
 
-echo Starting Depth Camera to Robot...
+echo Starting Depth Camera to Robot (Developer Mode)...
 echo (A browser tab will open at http://localhost:5005)
 echo.
 

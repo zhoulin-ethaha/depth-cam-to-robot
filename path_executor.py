@@ -1,11 +1,11 @@
-import math
 import threading
-import time
 from typing import Optional
 
 from scipy.spatial.transform import Rotation
 
-from config import DRAW_Z, TRAVEL_Z, DRAW_SPEED, TRAVEL_ACCEL, RTDE_FREQUENCY
+from config import (
+    DRAW_Z, TRAVEL_Z, DRAW_SPEED, TRAVEL_ACCEL, DRAW_ACCEL, MOVEP_BLEND_M,
+)
 
 
 def _offset_pose(pose: list[float], dist: float) -> list[float]:
@@ -125,8 +125,9 @@ class PathExecutor:
                     cancelled = True
                     break
 
-                # Stream stroke via servoL at RTDE_FREQUENCY for smooth continuous motion
-                self._servo_draw_stroke(stroke)
+                # Draw the stroke as a blended movep process move — identical
+                # actuation to the saved path.script.
+                self._movep_draw_stroke(stroke)
 
                 moves_done += len(stroke)
                 self._update_progress(moves_done, total_moves)
@@ -162,53 +163,25 @@ class PathExecutor:
 
         print(f"[executor] {'cancelled' if cancelled else 'done'}")
 
-    def _servo_draw_stroke(self, stroke: list[list[float]]) -> None:
-        """Stream a stroke via servoL at RTDE_FREQUENCY, advancing at DRAW_SPEED."""
-        dt = 1.0 / RTDE_FREQUENCY
+    def _movep_draw_stroke(self, stroke: list[list[float]]) -> None:
+        """
+        Draw one stroke as a blended ``movep`` process move — the same actuation
+        the saved path.script produces. Mirrors the export sequence: moveL onto
+        the first waypoint, then movep through the rest at DRAW_SPEED with
+        MOVEP_BLEND_M corner blending. draw_z is baked into every waypoint's Z.
+        """
         waypoints = [[p[0], p[1], p[2] + self._draw_z] + p[3:] for p in stroke]
-
-        arcs = [0.0]
-        for i in range(1, len(waypoints)):
-            dx = waypoints[i][0] - waypoints[i - 1][0]
-            dy = waypoints[i][1] - waypoints[i - 1][1]
-            dz = waypoints[i][2] - waypoints[i - 1][2]
-            arcs.append(arcs[-1] + math.sqrt(dx * dx + dy * dy + dz * dz))
-
-        total_arc = arcs[-1]
-        if total_arc < 1e-6:
-            self._robot.servo_to(waypoints[0])
-            time.sleep(dt * 5)
-            self._robot.stop_servo()
+        if not waypoints:
             return
 
-        n_steps = max(int(total_arc / self._draw_speed / dt), 1)
-        t_start = time.perf_counter()
+        # Land on the stroke start (export does movel to s[0] before movep).
+        self._robot.move_to(waypoints[0], self._draw_speed, TRAVEL_ACCEL)
 
-        for step in range(n_steps + 1):
-            if self._cancel_event.is_set():
-                break
-            alpha = step / n_steps
-            alpha_s = alpha * alpha * (3.0 - 2.0 * alpha)  # smoothstep ease-in/out
-            s = alpha_s * total_arc
-
-            j = 0
-            while j + 1 < len(arcs) and arcs[j + 1] < s:
-                j += 1
-            if j + 1 >= len(waypoints):
-                pos = waypoints[-1][:]
-            else:
-                seg = arcs[j + 1] - arcs[j]
-                t = (s - arcs[j]) / seg if seg > 1e-9 else 0.0
-                pos = [waypoints[j][k] + t * (waypoints[j + 1][k] - waypoints[j][k])
-                       for k in range(6)]
-
-            self._robot.servo_to(pos)
-
-            sleep_t = t_start + (step + 1) * dt - time.perf_counter()
-            if sleep_t > 0:
-                time.sleep(sleep_t)
-
-        self._robot.stop_servo()
+        if len(waypoints) > 1:
+            self._robot.move_process_path(
+                waypoints[1:], self._draw_speed, DRAW_ACCEL, MOVEP_BLEND_M,
+                self._cancel_event,
+            )
 
     def _update_progress(self, done: int, total: int) -> None:
         if total <= 0:

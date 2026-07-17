@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Depth Camera to Robot</title>
+  <title>Developer Mode</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
 
   <header>
-    <h1>Depth Camera to Robot</h1>
+    <h1>Developer Mode</h1>
     <div id="header-status">
       <div id="status-dot"></div>
       <span id="header-status-label">Disconnected</span>
@@ -26,6 +26,7 @@
 
         <div class="panel vp" id="vp-depth">
           <div class="panel-label">Depth</div>
+          <button id="btn-depth-numbers" title="Open Participant Mode: absolute depths (mm from camera) on the live view, plus the Auto toggle + trigger that run the pipeline automatically">⧉ Participant Mode</button>
           <img class="cam-live" id="feed-depth" src="/depth" alt="colorized depth feed" />
           <img class="cam-still hidden" id="still-depth" alt="captured depth still" />
           <!-- Crop overlay lives on the Depth viewport (live feed or captured still) -->
@@ -71,8 +72,12 @@
     <!-- Groove detection controls (shown while editing a captured depth still) -->
     <div id="edit-panel" class="hidden">
       <div id="edit-panel-header">
-        <span>Detect Grooves</span>
-        <button id="btn-reset-adjust" title="Reset all groove parameters">Reset</button>
+        <span>Detection Parameters</span>
+        <div class="hdr-btns">
+          <button id="btn-save-adjust" class="hdr-btn" title="Save the current detection parameters to a dated file">Save</button>
+          <button id="btn-load-adjust" class="hdr-btn" title="Load detection parameters from a saved file">Load</button>
+          <button id="btn-reset-adjust" class="hdr-btn" title="Reset all detection parameters">Reset</button>
+        </div>
       </div>
       <p id="edit-hint">All four views update live, even before you capture: <b>Depth</b> / <b>RGB</b> on top, <b>Skeleton</b> / <b>Mask</b> below (⇄ swaps a row's left/right). Tune until the raked grooves read as clean white centrelines, drag a crop on the Depth view to limit the area (grooves + path preview then show only that region), then <b>Capture Image</b> → <b>Generate Path</b>.</p>
 
@@ -200,6 +205,14 @@
       <p class="adj-note">Places the surface in the <b>robot base frame</b> — the 3D preview
         shows it at true location and scale relative to the robot origin (axes marker).</p>
 
+      <div class="adj-row">
+        <button id="btn-register" class="adj-btn" title="Touch one corner of the physical surface with the tool tip to place the mesh exactly (optional)">Register Corner → TCP…</button>
+      </div>
+      <p class="adj-note">Optional touch-off: instead of guessing X/Y/Z with the sliders,
+        pick a corner of the mesh, freedrive the tool tip onto that physical corner and
+        confirm — the surface snaps there. Rotation keeps the slider values.
+        Needs the robot connected; cancel keeps the current placement.</p>
+
       <div class="adj-row" data-skey="offset_mm" data-min="-10" data-max="50" data-step="0.5" data-default="0">
         <label>TCP offset (mm)</label><input type="range" /><span class="adj-val"></span></div>
       <p class="adj-note">Lifts the TCP off the surface along the local normal: 0 = contact,
@@ -222,7 +235,11 @@
         <label for="order-size">Size</label>
         <input type="range" id="order-size" min="0.05" max="3" step="0.05" value="1" />
       </div>
-      <div id="exec-bar" title="Execution settings — applied when Run is clicked">
+      <div id="exec-bar" title="Spacing re-generates the path; Speed / Offset / Safety apply when Run is clicked">
+        <label for="exec-spacing" title="Distance between robot waypoints along each stroke — re-generates the path">Spacing</label>
+        <input type="range" id="exec-spacing" min="10" max="100" step="1" value="10" />
+        <span id="exec-spacing-val">10 mm</span>
+        <span class="legend-sep"></span>
         <label for="exec-speed">Speed</label>
         <input type="range" id="exec-speed" min="1" max="100" step="1" value="5" />
         <span id="exec-speed-val">5%</span>
@@ -233,7 +250,7 @@
         <label for="exec-safety">Safety</label>
         <input type="number" id="exec-safety" value="50" step="5" min="5" max="300" /> mm
         <span class="legend-sep"></span>
-        <button id="btn-save-path" title="Save this toolpath (URScript + JSON + preview image) to a dated folder under paths/">💾 Save</button>
+        <button id="btn-save-path" title="Save this toolpath (URScript + JSON + preview image) to a dated folder under paths/">💾 Save Path</button>
       </div>
       <canvas id="threejs-canvas"></canvas>
     </div>
@@ -254,6 +271,45 @@
           </p>
           <button id="btn-ws-load-surface">Load 3D Surface (STL/OBJ)</button>
         </div>
+      </div>
+    </div>
+
+    <!-- Load-preset popup: lists saved Detection Parameter files to choose from -->
+    <div id="preset-overlay" class="hidden">
+      <div id="preset-panel">
+        <div id="preset-panel-header">
+          <span>Load Detection Parameters</span>
+          <button id="btn-preset-close" class="hdr-btn" title="Close">✕</button>
+        </div>
+        <p class="adj-note">Pick a saved settings file to load it into the sliders.</p>
+        <ul id="preset-list"></ul>
+      </div>
+    </div>
+
+    <!-- Corner→TCP registration popup: touch-off placement of the loaded surface -->
+    <div id="register-overlay" class="hidden">
+      <div id="register-panel">
+        <div id="register-panel-header">
+          <span>Register Corner → TCP</span>
+          <button id="btn-register-close" class="hdr-btn" title="Close without changing the placement">✕</button>
+        </div>
+        <p class="adj-note">Numbered markers now show the mesh's corners in the
+          <b>Path Preview</b> (vertices nearest the bounding-box corners).
+          <b>1.</b> Pick a corner: <b>click its marker in the preview</b> or a row
+          below — hovering either highlights the marker <b style="color:#66d9ff">cyan</b>;
+          the selected one turns <b style="color:#00e5a0">green</b>. The preview stays
+          visible and orbitable while this dialog is open.
+          <b>2.</b> <b>Start Freedrive</b> and move the robot by hand until
+          the <b>tool tip touches that physical corner</b>. <b>3.</b> <b>Confirm</b> — the
+          surface moves so the selected corner sits exactly at the TCP. Rotation keeps the
+          slider values (set those first). Closing without confirming keeps the current
+          placement.</p>
+        <ul id="register-list"></ul>
+        <div id="register-actions">
+          <button id="btn-register-freedrive" class="adj-btn">Start Freedrive</button>
+          <button id="btn-register-confirm" class="adj-btn" disabled>Confirm: corner = TCP</button>
+        </div>
+        <p class="adj-note" id="register-status">No corner selected.</p>
       </div>
     </div>
 

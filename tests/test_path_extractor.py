@@ -135,13 +135,8 @@ class TestExtractFromEdges:
         result = extract_from_edges(mask_long_line, min_contour_pixels=3)
         assert result.total_strokes >= 1
 
-    def test_hardcodes_10px_spacing(self, mask_long_line):
-        """
-        BUG DOCUMENTATION: RESAMPLE_SPACING_MM is defined in config but unused.
-        extract_from_edges hardcodes spacing_px = 10.0.
-        This test confirms the actual 10px behavior and flags the inconsistency.
-        When the bug is fixed to use RESAMPLE_SPACING_MM, update this assertion.
-        """
+    def test_fallback_10px_spacing_without_scale(self, mask_long_line):
+        """Without a mm-per-pixel scale (Test Mode), spacing falls back to 10 px."""
         result = extract_from_edges(mask_long_line)
         assert result.total_strokes >= 1
         for stroke in result.strokes:
@@ -149,8 +144,31 @@ class TestExtractFromEdges:
                 dx = stroke[i][0] - stroke[i - 1][0]
                 dy = stroke[i][1] - stroke[i - 1][1]
                 dist = math.sqrt(dx * dx + dy * dy)
-                # spacing is ~10px (hardcoded), not RESAMPLE_SPACING_MM=5mm
                 assert dist <= 15, f"point spacing {dist:.1f}px unexpectedly large"
+
+    def test_mm_spacing_converts_via_scale(self, mask_long_line):
+        """spacing_mm=20 at 1 mm/px must give ~20 px between waypoints."""
+        result = extract_from_edges(mask_long_line, spacing_mm=20.0, mm_per_px=1.0)
+        assert result.total_strokes >= 1
+        for stroke in result.strokes:
+            # all gaps except the closing one should be ≈20 px
+            for i in range(1, len(stroke) - 1):
+                dx = stroke[i][0] - stroke[i - 1][0]
+                dy = stroke[i][1] - stroke[i - 1][1]
+                dist = math.sqrt(dx * dx + dy * dy)
+                assert 16 <= dist <= 24, f"spacing {dist:.1f}px not ≈20px"
+
+    def test_wider_spacing_gives_fewer_waypoints(self, mask_long_line):
+        near = extract_from_edges(mask_long_line, spacing_mm=10.0, mm_per_px=1.0)
+        far  = extract_from_edges(mask_long_line, spacing_mm=100.0, mm_per_px=1.0)
+        assert far.total_points < near.total_points
+
+    def test_dense_skeleton_returned_alongside(self, mask_long_line):
+        """strokes_dense (white preview line) is denser than the waypoint strokes."""
+        result = extract_from_edges(mask_long_line, spacing_mm=50.0, mm_per_px=1.0)
+        assert result.strokes_dense
+        dense_pts = sum(len(s) for s in result.strokes_dense)
+        assert dense_pts > result.total_points
 
     def test_single_pixel_does_not_crash(self, mask_blank):
         """A mask with a single bright pixel must not crash the chain extractor."""

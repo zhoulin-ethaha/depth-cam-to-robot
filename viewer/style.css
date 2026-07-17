@@ -108,8 +108,8 @@ main {
 /* Swap the two viewports left/right — small button at the row's top-centre. */
 .swap-btn {
   position: absolute;
-  top: 6px; left: 50%;
-  transform: translateX(-50%);
+  top: 50%; left: 50%;   /* vertically centred — clear of viewport labels and popup buttons */
+  transform: translate(-50%, -50%);
   z-index: 11;
   padding: 2px 8px;
   font-size: 12px;
@@ -122,9 +122,11 @@ main {
 }
 .swap-btn:hover { background: #2a2a2a; color: #fff; }
 
-/* Open the projector / calibration windows from the Mask viewport. */
+/* Open the projector / calibration windows from the Mask viewport, and the
+   depth-numbers reference window from the Depth viewport. */
 #btn-project,
-#btn-project-cal {
+#btn-project-cal,
+#btn-depth-numbers {
   position: absolute;
   top: 6px;
   z-index: 11;
@@ -139,8 +141,9 @@ main {
 }
 #btn-project { right: 6px; }
 #btn-project-cal { right: 84px; }
-#btn-project:hover, #btn-project-cal:hover { background: #2a2a2a; color: #fff; }
-#btn-project.active, #btn-project-cal.active { border-color: #00e5a0; color: #00e5a0; }
+#btn-depth-numbers { right: 6px; }
+#btn-project:hover, #btn-project-cal:hover, #btn-depth-numbers:hover { background: #2a2a2a; color: #fff; }
+#btn-project.active, #btn-project-cal.active, #btn-depth-numbers.active { border-color: #00e5a0; color: #00e5a0; }
 
 #panel-3d {
   grid-column: 3;
@@ -294,6 +297,8 @@ main {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;          /* title + 3 buttons can exceed 270px → wrap */
+  row-gap: 6px;
 }
 #edit-panel-header span {
   font-size: 12px;
@@ -301,7 +306,8 @@ main {
   color: #e8e8e8;
   letter-spacing: 0.04em;
 }
-#btn-reset-adjust { padding: 2px 9px; font-size: 10px; }
+#edit-panel-header .hdr-btns { display: flex; gap: 4px; }
+.hdr-btn { padding: 2px 9px; font-size: 10px; }
 
 #edit-hint {
   font-size: 10px;
@@ -508,6 +514,92 @@ button:disabled { opacity: 0.3; cursor: not-allowed; }
   z-index: 100;
 }
 #ws-overlay.hidden { display: none; }
+
+/* ── Load-preset + Corner-registration popups (shared styling) ── */
+#preset-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(10, 10, 10, 0.82);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 110;
+}
+/* The register dialog must NOT hide the Path Preview: the corner markers live
+   there. No backdrop, docked over the camera column (left), and the rest of
+   the page stays fully interactive (orbit the preview, click markers). */
+#register-overlay {
+  position: absolute;
+  inset: 0;
+  background: transparent;
+  pointer-events: none;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 12px 0 0 12px;
+  z-index: 110;
+}
+#register-panel {
+  pointer-events: auto;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.75);
+  border-color: #3a3a3a;
+}
+#preset-overlay.hidden, #register-overlay.hidden { display: none; }
+
+#preset-panel,
+#register-panel {
+  background: #181818;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  width: 420px;
+  max-width: calc(100vw - 48px);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+}
+#preset-panel-header,
+#register-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+#preset-panel-header span,
+#register-panel-header span {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e8e8e8;
+  letter-spacing: 0.04em;
+}
+
+#preset-list, #register-list { list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.preset-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px;
+  background: #202020;
+  border: 1px solid #2f2f2f;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.preset-item:hover { background: #2a2a2a; border-color: #5599ff88; }
+.preset-item.sel { border-color: #00e5a0; background: #12281f; }
+.preset-item.sel .preset-name { color: #00e5a0; }
+/* Corner hovered in the 3D preview → its row lights up in the register list. */
+.preset-item.hov { border-color: #66d9ff; background: #14242e; }
+.preset-name { font-size: 11px; color: #d0d0d0; }
+.preset-time { font-size: 10px; color: #777; font-variant-numeric: tabular-nums; }
+.preset-empty { font-size: 11px; color: #777; padding: 6px 2px; }
+
+#register-actions { display: flex; gap: 6px; }
+#btn-register-freedrive.active { border-color: #ffb020; color: #ffb020; }
+#register-status { margin: 0; }
 
 #ws-panel {
   background: #181818;

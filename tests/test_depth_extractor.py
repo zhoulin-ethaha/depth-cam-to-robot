@@ -14,6 +14,8 @@ from depth_extractor import (
     DepthGrooveParams,
     ProcessedDepth,
     colorize_depth,
+    depth_below_threshold,
+    depth_region_labels,
     groove_mask,
     grooves_and_mask,
     grooves_from_depth,
@@ -279,3 +281,88 @@ class TestDepthCameraThreadNoHardware:
         state, lock = shared_state_and_lock
         ct = DepthCameraThread(state, lock)
         assert ct.capture_frame() is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# depth_region_labels (depth-number overlay popup)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestDepthRegionLabels:
+
+    def test_flat_plane_single_label(self):
+        z = np.full((480, 640), 1.0, np.float32)          # 1.000 m everywhere
+        ok = np.ones_like(z, bool)
+        labels = depth_region_labels(z, ok, interval_mm=10.0)
+        assert len(labels) == 1
+        u, v, mm = labels[0]
+        assert mm == 1000.0
+        # Centroid of a full frame ≈ the frame centre (full-frame pixel coords).
+        assert 300 <= u <= 340 and 220 <= v <= 260
+
+    def test_two_bands_two_labels(self):
+        z = np.full((480, 640), 1.0, np.float32)
+        z[:, 320:] = 1.05                                  # right half 50 mm farther
+        ok = np.ones_like(z, bool)
+        labels = depth_region_labels(z, ok, interval_mm=10.0)
+        assert len(labels) == 2
+        depths = sorted(l[2] for l in labels)
+        assert depths == [1000.0, 1050.0]
+
+    def test_interval_merges_bands(self):
+        z = np.full((480, 640), 1.0, np.float32)
+        z[:, 320:] = 1.02                                  # 20 mm step …
+        ok = np.ones_like(z, bool)
+        labels = depth_region_labels(z, ok, interval_mm=100.0)   # … inside one 100 mm band
+        assert len(labels) == 1
+
+    def test_all_invalid_returns_empty(self):
+        z = np.zeros((480, 640), np.float32)
+        ok = np.zeros_like(z, bool)
+        assert depth_region_labels(z, ok, interval_mm=10.0) == []
+
+    def test_small_regions_dropped(self):
+        z = np.full((480, 640), 1.0, np.float32)
+        z[:6, :6] = 1.5                                    # 3×3 at half res < min area
+        ok = np.ones_like(z, bool)
+        labels = depth_region_labels(z, ok, interval_mm=10.0)
+        assert all(l[2] == 1000.0 for l in labels)
+
+    def test_max_labels_cap(self):
+        rng = np.random.default_rng(0)
+        # Checkerboard of random depths → many bands/regions.
+        z = (rng.integers(5, 200, (480, 640)) / 100.0).astype(np.float32)
+        ok = np.ones_like(z, bool)
+        labels = depth_region_labels(z, ok, interval_mm=1.0, min_area_px=1, max_labels=20)
+        assert len(labels) <= 20
+
+
+class TestDepthBelowThreshold:
+    """Participant-Mode trigger: enough valid pixels closer than the threshold."""
+
+    def test_hand_in_frame_triggers(self):
+        z = np.full((480, 640), 0.9, np.float32)           # sand at 900 mm
+        z[100:200, 100:200] = 0.5                          # hand at 500 mm
+        ok = np.ones_like(z, bool)
+        assert depth_below_threshold(z, ok, threshold_mm=700.0) is True
+
+    def test_clear_frame_does_not_trigger(self):
+        z = np.full((480, 640), 0.9, np.float32)
+        ok = np.ones_like(z, bool)
+        assert depth_below_threshold(z, ok, threshold_mm=700.0) is False
+
+    def test_speckle_below_min_area_ignored(self):
+        z = np.full((480, 640), 0.9, np.float32)
+        z[0:5, 0:5] = 0.3                                  # 25 px of near noise
+        ok = np.ones_like(z, bool)
+        assert depth_below_threshold(z, ok, threshold_mm=700.0, min_px=150) is False
+
+    def test_invalid_pixels_do_not_count(self):
+        z = np.zeros((480, 640), np.float32)               # 0 m would read as "near"
+        ok = np.zeros_like(z, bool)                        # …but nothing is valid
+        assert depth_below_threshold(z, ok, threshold_mm=700.0) is False
+
+    def test_disabled_threshold(self):
+        z = np.full((480, 640), 0.1, np.float32)
+        ok = np.ones_like(z, bool)
+        assert depth_below_threshold(z, ok, threshold_mm=None) is False
+        assert depth_below_threshold(z, ok, threshold_mm=0.0) is False

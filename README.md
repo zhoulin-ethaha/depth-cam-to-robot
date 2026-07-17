@@ -24,8 +24,9 @@ RealSense reports, colorizing it only for display.
 4. The strokes are **projected onto a target surface** — a mesh authored in Rhino
    and loaded as STL/OBJ (flat, tilted, vertical, or fully non-planar) — with the
    TCP oriented perpendicular to the surface at every waypoint.
-5. A Universal Robots arm traces the 6-DOF path with smooth `servoL` streaming at
-   125 Hz, at a user-set speed, hover offset, and safety retract distance.
+5. A Universal Robots arm traces the 6-DOF path with blended `movep` process
+   moves — the same actuation a saved `path.script` produces — at a user-set
+   speed, waypoint spacing, hover offset, and safety retract distance.
 
 All interaction happens in a browser-based UI that opens automatically. No ROS, no
 offline programming.
@@ -56,7 +57,8 @@ _chains_from_edges()          ← 8-connected pixel chain follower (visit once)
 smooth_stroke()               ← Chaikin corner-cutting (2 iterations)
     │
     ▼
-resample_stroke()             ← uniform arc-length resampling (~10 px spacing)
+resample_stroke()             ← uniform arc-length resampling (Spacing slider,
+    │                             10–100 mm between waypoints; default 10 mm)
     │
     ▼
 _order_strokes()              ← TSP nearest-neighbour; minimises pen-up travel
@@ -72,7 +74,9 @@ reach check                   ← flags waypoints outside the arm's envelope (re
 PathExecutor._run()
     ├─ moveL  retract along the tool axis (safety distance)
     ├─ moveL  travel to the retracted stroke start
-    └─ servoL stream  (125 Hz, smoothstep ease-in/out, 6-DOF)
+    ├─ moveL  land on the first waypoint
+    └─ movep  blended process move through the remaining waypoints
+              (0.5 mm blend radius — identical to the saved path.script)
          ── repeats per stroke ──
     └─ moveL  final retract
 ```
@@ -192,7 +196,7 @@ pip install -r requirements.txt
 | `pyrealsense2 >= 2.54` | RealSense depth capture |
 | `opencv-python >= 4.8` | Depth filtering, colorizing, JPEG encoding |
 | `scikit-image >= 0.22` | Fast skeletonization (a pure-numpy fallback runs without it) |
-| `ur-rtde >= 1.6` | UR robot RTDE control (moveL, servoL, TCP pose) |
+| `ur-rtde >= 1.6` | UR robot RTDE control (moveL, movep paths, TCP pose) |
 | `aiohttp >= 3.9` | Async web server, MJPEG streaming, WebSocket |
 | `numpy >= 1.26` | Array operations |
 | `trimesh >= 4.0` + `rtree` | Target-surface mesh loading and ray-casting |
@@ -206,9 +210,12 @@ pip install -r requirements.txt
 python main.py
 ```
 
-The browser opens automatically at **`http://localhost:5005`**. (Port 5005 is
-deliberately off the common 8080/8000 range so this app can run alongside other
-tools without a port clash.) Closing the browser tab stops the server.
+The browser opens automatically at **`http://localhost:5005`** — this is
+**Developer Mode**, the full manual UI; `run.bat` starts the same thing by
+double-click. **Participant Mode** is its **⧉ Participant Mode** popup (on the
+Depth viewport) — see *Participant Mode* below. (Port 5005 is deliberately off
+the common 8080/8000 range so this app can run alongside other tools without a
+port clash.) Closing the last browser window stops the server.
 
 ---
 
@@ -227,34 +234,95 @@ tools without a port clash.) Closing the browser tab stops the server.
    1-px centrelines that become the path) and **Mask** (the thick detected region,
    which shows groove *width* and is handy while tuning).
 
-4. **Tune detection live** — the **Detect Grooves** panel is available *before* you
-   capture. Pick a **Mode** (Valley / Ridge / Band) and adjust **Groove depth**,
+   **⧉ Participant Mode** (Depth viewport) opens a popup showing the live depth
+   view with the **absolute distance from the camera (mm)** written at the centre
+   of each iso-depth region. A **Region interval** slider sets how wide (in mm)
+   each depth band is — smaller = more, finer regions; a **Text size** slider
+   sets the number size. The depth numbers are display-only (never affect
+   detection or the path) and are computed only while the popup is open. The
+   popup also holds the **Auto** toggle and **Trigger below** box that automate
+   the whole pipeline — see *Participant Mode* below.
+
+4. **Tune detection live** — the **Detection Parameters** panel is available *before*
+   you capture. Pick a **Mode** (Valley / Ridge / Band) and adjust **Groove depth**,
    **Surface scale**, **Denoise**, and **Min blob**; the groove viewports update in
    real time. You can also drag a **crop** rectangle directly on the Depth view to
    limit the region — RGB/Skeleton/Mask then show only the cropped area.
+   **Save** stores the current slider values to a dated file under `presets/`;
+   **Load** opens a popup listing those files to restore one; **Reset** returns
+   everything to defaults.
 
 5. **Capture Image** — freezes a temporally averaged depth (+ aligned colour) frame;
    the crop you drew carries over (adjust it on the still: drag inside to move, corners
    to resize; **Reset Crop** restores the full frame). Detection — and the generated
    path — cover only the cropped region. (Depth-view range sliders are display-only.)
 
-6. **Generate Path** — the 3D viewer shows the surface and the extracted path
-   (green = pen-down, grey = pen-up travel). Waypoints outside the arm's estimated
-   reach are highlighted **red** with a header warning — move the surface closer or
-   crop smaller before running. The **Path | Order** toggle switches to a numbered
-   view (stroke order, green start / red end dots, size slider); **⧉ Pop out**
-   opens the preview in its own window. Re-tune and regenerate freely, or
-   **Retake** for a fresh capture.
+6. **Generate Path** — the 3D viewer shows the surface, the detected skeleton
+   as a **white** line lying exactly on the surface, and the actual movep
+   toolpath: **green** blended segments with a dot at every waypoint (red where
+   outside the arm's estimated reach), **amber** safety/retract points off each
+   stroke's start and end, and **grey** pen-up travel/approach moves. The
+   toolpath sits at the current **Offset** above the white skeleton and updates
+   live as you edit Offset/Safety. **Spacing** (10–100 mm) sets the distance
+   between waypoints and re-generates the path when released. The
+   **Path | Order** toggle switches to a numbered view (stroke order, green
+   start / red end dots, size slider); **⧉ Pop out** opens the preview in its
+   own window. Re-tune and regenerate freely, or **Retake** for a fresh capture.
 
 7. **Run** — set **Speed** (% of max TCP speed — governs the *entire* motion,
    travels included), **Offset** (mm off the surface along the local normal) and
    **Safety** (retract distance, mm) in the preview's execution bar, then Run. The
    blue dot tracks the live TCP along the strokes. A progress bar tracks execution;
    **Cancel** stops mid-stroke; failures show "Run failed: …" in the header.
+   Execution uses the same blended `movep` motion as the saved `path.script`,
+   so a live run and a saved-file run trace the strokes identically.
 
-   **💾 Save** (execution bar) writes the toolpath — with the current
+   **💾 Save Path** (execution bar) writes the toolpath — with the current
    Speed/Offset/Safety baked in — to a timestamped folder under `paths/` (see
    *Saving toolpaths* below).
+
+### Participant Mode (automated pipeline)
+
+Participant Mode is the **⧉ Participant Mode popup** (Depth viewport). It
+replaces the buttons with a **depth trigger**: a participant rakes the sand,
+pulls their hand out, and the robot retraces the grooves — no clicks.
+
+**How it works.** In the popup, enter a distance in the **Trigger below** box
+(mm from the camera, same unit as the displayed depth numbers — e.g. sand at
+900 mm → enter 700), then switch the **Auto** toggle **ON**. The automation
+cycles through these statuses, shown **large in the popup's top-right corner**:
+
+| Status | Meaning |
+|---|---|
+| **Auto Off** | Toggle off — the popup is just the depth-number viewport. |
+| **Auto On** | Armed; nothing in frame is closer than the trigger. |
+| **Alerted** | Something closer than the trigger is in frame (a hand raking). |
+| **Sensing** | Frame stayed clear for ~1 s → capturing the averaged depth still. |
+| **Generating Paths** | Extracting strokes and building the toolpath. |
+| **Actuating** | Saving the bundle to `paths/` and running it on the robot. |
+
+After Actuating it returns to **Auto On**, ready for the next participant.
+
+While Auto is **ON**, the manual **Capture / Retake / Generate / Run** buttons
+in Developer Mode grey out (the server also refuses them) — the automation
+owns the pipeline. **Cancel stays active** as the emergency stop for a running
+path. Switching Auto **OFF** re-enables the buttons immediately.
+
+Details worth knowing:
+
+- The automated run reuses the **same pipeline as the Developer-Mode buttons**,
+  with the current Detection Parameters, crop, Spacing and Offset / Safety /
+  Speed exactly as Developer Mode shows them (config defaults on a fresh app
+  start). Set everything up — surface loaded, robot connected, parameters
+  tuned — then flip Auto ON; the Developer window shows each automated step live.
+- Auto ON with an empty trigger box can never fire — the popup shows
+  "Enter a trigger distance (mm) to arm."
+- Without a robot connected the toolpath is still generated and **saved**;
+  only the run is skipped.
+- Auto stays ON server-side even if the popup window is closed — switch the
+  toggle off to disarm.
+- Sensing deliberately waits ~1 s before capturing: the averaged still uses the
+  past second of frames, which must not contain the hand.
 
 ### Test mode (no robot)
 
@@ -289,9 +357,35 @@ draws on a *real* physical surface, the virtual placement must match reality —
 set the sliders to where the object sits relative to the robot base and verify
 with the preview and a slow, offset-first run.
 
+### Register Corner → TCP (touch-off placement)
+
+Instead of guessing X/Y/Z with the sliders, measure the placement with the robot
+itself. **Register Corner → TCP…** (Target surface section) opens a dialog
+docked at the top-left — the **Path Preview stays fully visible and orbitable**
+— and shows **numbered markers** on the mesh's corners there (the mesh vertices
+nearest its bounding-box corners — a sheet-like surface shows 4):
+
+1. **Pick a corner** — either **click its marker directly in the Path Preview**
+   (the cursor becomes a pointer near one) or click a row in the dialog's list.
+   Hovering a marker or a list row highlights that corner **cyan and enlarged**,
+   so you always see which corner you are about to choose; the selected one
+   turns **green**. There's no ambiguity about which physical corner to touch.
+2. **Start Freedrive** and move the robot by hand until the **tool tip touches
+   that corner of the physical object**.
+3. **Confirm** — the surface pose updates so the selected mesh corner sits
+   exactly at the measured TCP point. The X/Y/Z sliders jump to the solved
+   values; re-run **Generate Path** afterwards.
+
+One corner fixes **position only** — rotation keeps whatever the Rot X/Y/Z
+sliders say, so set the orientation first (or model the object already oriented
+in Rhino). Registration is optional: closing the popup without confirming keeps
+the current placement. Requires the robot connected; freedrive ends
+automatically on confirm or close. (A 3-corner version that also solves the
+rotation is planned — the solver already supports it.)
+
 ### Saving toolpaths
 
-**💾 Save** in the execution bar writes the generated toolpath to a **timestamped
+**💾 Save Path** in the execution bar writes the generated toolpath to a **timestamped
 subfolder** under `paths/` (e.g. `paths/2026-07-13_14-32-08/`) containing three
 files:
 
@@ -366,7 +460,8 @@ All parameters live in `config.py`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RESAMPLE_SPACING_MM` | `5.0` mm | Target spacing between resampled waypoints |
+| `RESAMPLE_SPACING_MM` | `10.0` mm | Default waypoint spacing (Spacing slider overrides per generate) |
+| `RESAMPLE_SPACING_MIN_MM` / `MAX_MM` | `10` / `100` mm | Spacing slider range |
 
 ### Target surface
 
@@ -389,16 +484,7 @@ All parameters live in `config.py`.
 | `TOOL_ORIENTATION` | `[0, π, 0]` | rad | Planar-mode TCP orientation (surface mode derives it per waypoint) |
 | `UR_REACH_M` | `1.30` | m | Reach-check envelope radius around the base |
 | `UR_MIN_REACH_M` | `0.18` | m | Reach-check inner cylinder around the base axis |
-
-### RTDE servo streaming
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `RTDE_FREQUENCY` | `125` Hz | servoL command rate |
-| `SERVO_LOOKAHEAD_TIME` | `0.1` s | Lookahead buffer for smooth interpolation |
-| `SERVO_GAIN` | `300` | Proportional gain for servo control |
-| `SERVO_VELOCITY_DEFAULT` | `0.10` m/s | Velocity hint passed to servoL |
-| `SERVO_ACCELERATION` | `0.5` m/s² | Acceleration hint passed to servoL |
+| `MOVEP_BLEND_M` | `0.0005` | m | movep blend radius — shared by live execution and the URScript export |
 
 ### Robot home position
 
@@ -415,15 +501,17 @@ All parameters live in `config.py`.
 ```
 depth_cam-to-robot/
 ├── main.py                  # Entry point: shared state, callbacks, startup, TCP poller
+├── automation.py            # Participant-Mode state machine (trigger → auto pipeline)
 ├── config.py                # All configurable parameters
 ├── server.py                # aiohttp server: MJPEG feeds, WebSocket, surface upload
 ├── camera_thread.py         # DepthCameraThread: RealSense → depth/RGB/skeleton/mask streams
 ├── depth_extractor.py       # Depth → groove engine: colorize, detect, filter, skeletonize
 ├── path_extractor.py        # Grooves → pixel chains → smooth → resample → TSP
 ├── surface.py               # Target mesh: STL/OBJ load, projection, normal TCP orientations
+├── registration.py          # Corner→TCP touch-off placement (1-point + Kabsch ≥3-point)
 ├── path_export.py           # Save toolpath → URScript + JSON (poses+frames) + preview PNG
-├── path_executor.py         # Background thread: retract/travel/servoL per stroke, progress
-├── robot_controller.py      # Thread-safe ur-rtde wrapper (moveL, servoL, EE pose)
+├── path_executor.py         # Background thread: retract/travel/movep per stroke, progress
+├── robot_controller.py      # Thread-safe ur-rtde wrapper (moveL, movep paths, EE pose)
 ├── workspace.py             # Planar fallback mapping (Test Mode)
 ├── reach.py                 # Reach-envelope estimate (importable without hardware)
 ├── settings.py              # Persistent JSON settings (last robot IP)
@@ -436,10 +524,14 @@ depth_cam-to-robot/
 ├── settings.json            # Auto-generated: saved app settings
 ├── surfaces/                # Uploaded target meshes (gitignored)
 ├── paths/                   # Saved toolpaths: dated folders of .script/.json/.png (gitignored)
+├── presets/                 # Saved Detection-Parameter files, named by date (gitignored)
 ├── tests/                   # Unit + hardware-gated integration tests
 └── viewer/
     ├── index.html           # Single-page app
     ├── viewer.js            # WebSocket client, UI handlers, Three.js 3D path preview
+    ├── projection.html      # Projector output / corner-pin calibration window
+    ├── depth_view.html      # Participant Mode popup (depth numbers + Auto + trigger)
+    ├── depth_overlay.js     # Popup logic: number overlay, Auto toggle, status chip
     ├── style.css            # Responsive layout
     └── lib/
         ├── three.min.js     # Three.js (3D rendering)
@@ -459,7 +551,7 @@ Three background daemon threads run alongside the async event loop:
   mask — the latter three cropped to the live crop box), and buffers the recent
   raw metric depth so Capture can return a temporally averaged frame.
 - **`PathExecutor`** — runs the per-stroke retract/travel/draw sequence.
-  Long-running RTDE calls (`moveL`, `servoL`) happen here so the WebSocket
+  Long-running RTDE calls (`moveL`, `movePath`) happen here so the WebSocket
   broadcast loop is never blocked.
 - **TCP poller** — reads the robot's actual TCP pose at 10 Hz while connected so
   the preview's blue dot tracks the arm in real time.
@@ -470,23 +562,27 @@ by `state_lock: threading.Lock`. The aiohttp event loop offloads blocking work v
 
 ### Surface placement (instead of calibration)
 
-There is no robot-side calibration: the target surface's pose in the robot base
+There is no camera↔robot calibration: the target surface's pose in the robot base
 frame is set directly with the placement sliders and verified visually (the axes
-marker in the preview is the base origin). `SurfacePose` (translation + XYZ Euler)
-transforms projected waypoints and normals into the base frame. The planar
+marker in the preview is the base origin), or measured with the corner→TCP
+touch-off (`registration.py` — 1-point translation now, Kabsch ≥3-point full-pose
+solver ready for a future multi-corner flow). `SurfacePose` (translation + XYZ
+Euler) transforms projected waypoints and normals into the base frame. The planar
 `WorkspaceConfig` mapping remains as the Test-Mode fallback.
 
-### Smooth robot motion
+### Consistent robot motion (live = saved)
 
-Drawing strokes use `servoL` rather than `moveL`:
+Drawing strokes use blended `movep` process moves rather than streamed servoing:
 
-- Commands stream at **125 Hz** (8 ms timesteps), interpolating position *and*
-  orientation (6-DOF) between waypoints.
-- Position advances using **arc-length parameterisation** — the speed set on the
-  Speed slider holds regardless of waypoint density, and the same speed is used
-  for retract/travel moves so the whole actuation is uniform.
-- **Smoothstep ease-in/out** (`f(α) = 3α² − 2α³`) zeroes velocity at stroke
-  start/end (peaking at 1.5× mid-stroke), eliminating jerk at pen-down/up.
+- Each stroke is one `movePath` of `movep` waypoints executed by the robot's own
+  controller at **constant tool speed**, with a small blend radius
+  (`MOVEP_BLEND_M`, 0.5 mm) rounding each waypoint transition.
+- The saved `path.script` is built from the **same movep parameters**, so a live
+  run from the browser and an offline run of the saved file trace the strokes
+  identically — the whole point of the movep switch.
+- The same speed is used for retract/travel moves so the whole actuation is
+  uniform, and the path runs asynchronously so **Cancel** stays responsive
+  mid-stroke.
 
 ---
 
@@ -508,7 +604,7 @@ pytest -m integration -v
 | `test_depth_extractor.py` | Depth → groove detection, natural-groove filters, colorize, crop/process |
 | `test_path_extractor.py` | Chain extraction, resampling, TSP ordering, coordinate mapping |
 | `test_surface.py` | Mesh projection (flat/tilted/vertical), normal TCP orientations, offsets, placement, misses |
-| `test_path_executor.py` | Stroke sequencing, servoL streaming, uniform speed, tool-axis retracts, cancel |
+| `test_path_executor.py` | Stroke sequencing, movep drawing, uniform speed, tool-axis retracts, cancel |
 | `test_path_export.py` | URScript generation, JSON poses+frames, offset baking, timestamped bundle saving |
 | `test_robot_controller.py` | RTDE port probe, connect/disconnect, motion commands, thread safety |
 | `test_integration.py` | Live RealSense feed, full depth→groove→robot pipeline (hardware-gated) |

@@ -114,8 +114,70 @@ function buildSurfaceViz(mesh) {
     new THREE.LineBasicMaterial({ color: 0x5a4a33, transparent: true, opacity: 0.25 })
   );
   surfaceGroup.add(wire);
+  buildCornerMarkers(mesh.corners, geo);   // numbered touch-off corners (hidden)
   scene.add(surfaceGroup);
   applySurfacePose(readSurfacePose());
+}
+
+/* ── Corner markers for Register Corner → TCP ───────────────────────────── */
+/* Numbered spheres at the mesh's touch-off corners (LOCAL frame, from the
+   server's mesh payload). Children of surfaceGroup so they follow the pose
+   sliders automatically; visible only while the registration popup is open. */
+let cornerGroup = null;
+let cornerMeshes = [];        // sphere per corner, for selection highlighting
+let surfaceCorners = [];      // local-frame [x,y,z] — indices match the server
+let selectedCorner = -1;
+let hoveredCorner = -1;       // hover in the list OR over a marker in the preview
+
+function buildCornerMarkers(corners, geo) {
+  surfaceCorners = corners || [];
+  cornerGroup = new THREE.Group();
+  cornerGroup.visible = false;
+  cornerMeshes = [];
+  geo.computeBoundingSphere();
+  const r = Math.max((geo.boundingSphere ? geo.boundingSphere.radius : 0.2) * 0.02, 0.005);
+  surfaceCorners.forEach((c, i) => {
+    const m = new THREE.Mesh(
+      new THREE.SphereGeometry(r, 12, 8),
+      new THREE.MeshBasicMaterial({ color: 0xffb020, depthTest: false }));
+    m.position.set(c[0], c[1], c[2]);
+    m.renderOrder = 5;
+    cornerGroup.add(m);
+    cornerMeshes.push(m);
+    const label = makeTextSprite(String(i + 1));
+    label.position.set(c[0], c[1], c[2]);
+    label.center.set(0.5, -0.35);          // number floats just above the dot
+    label.scale.setScalar(r * 7);
+    label.renderOrder = 6;
+    cornerGroup.add(label);
+  });
+  surfaceGroup.add(cornerGroup);
+}
+
+function makeTextSprite(text) {
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = 64;
+  const c = cv.getContext("2d");
+  c.font = "bold 44px monospace";
+  c.textAlign = "center";
+  c.textBaseline = "middle";
+  c.lineWidth = 8;
+  c.strokeStyle = "#000000";
+  c.strokeText(text, 32, 34);
+  c.fillStyle = "#ffffff";
+  c.fillText(text, 32, 34);
+  const tex = new THREE.CanvasTexture(cv);
+  return new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+}
+
+function updateCornerHighlight() {
+  // Selected = green; hovered (list row or preview marker) = cyan + enlarged,
+  // so the user always sees WHICH corner they are about to pick.
+  cornerMeshes.forEach((m, i) => {
+    const sel = i === selectedCorner, hov = i === hoveredCorner;
+    m.material.color.setHex(sel ? 0x00e5a0 : hov ? 0x66d9ff : 0xffb020);
+    m.scale.setScalar(hov || sel ? 1.7 : 1.0);
+  });
 }
 
 function applySurfacePose(p) {
@@ -127,60 +189,170 @@ function applySurfacePose(p) {
 }
 
 /* ── Path preview (set after Capture) ──────────────────────────────────── */
+/* Two layers:
+   - skelGroup: the detected skeleton projected onto the surface — a dense
+     WHITE line lying exactly ON the surface (zero offset). Pure geometry.
+   - pathGroup: the actual movep toolpath — waypoints at the chosen Spacing,
+     lifted by the exec-bar Offset along each waypoint's tool axis, corners
+     rounded by the movep blend radius, with waypoint dots, amber safety
+     (retract) points and gray travel/approach moves. Rebuilt client-side
+     whenever Offset or Safety change; Spacing re-generates on the server. */
 let pathGroup  = null;
+let skelGroup  = null;
 let orderGroup = null;
-let lastStrokes = null;
+let lastStrokes  = null;   // 6-DOF waypoint strokes from the server
+let lastSkeleton = null;   // dense [x,y,z] skeleton polylines
+let execViz    = { blend_m: 0.0005, reach_m: 1.30, min_reach_m: 0.18 };
 let pathMode   = "path";   // "path" | "order"
 let orderSize  = 1.0;      // multiplier for order numbers + start/end dots
 
-function buildPathViz(strokes, reachFlags) {
-  if (pathGroup) { scene.remove(pathGroup); pathGroup = null; }
-  lastStrokes = strokes && strokes.length ? strokes : null;
+/* Outward surface normal at a waypoint = -(R @ [0,0,1]) — mirrors
+   path_executor._offset_pose / path_export._tool_axis on the server. */
+function toolNormal(pose) {
+  const rv  = new THREE.Vector3(pose[3], pose[4], pose[5]);
+  const ang = rv.length();
+  const q   = new THREE.Quaternion();
+  if (ang > 1e-9) q.setFromAxisAngle(rv.divideScalar(ang), ang);
+  return new THREE.Vector3(0, 0, 1).applyQuaternion(q).negate();
+}
 
-  if (lastStrokes) {
-    pathGroup = new THREE.Group();
-    const travelMat = new THREE.LineBasicMaterial({ color: 0x444466 }); // gray — travel
-    const okPts  = [];   // reachable draw segments (green)
-    const badPts = [];   // unreachable draw segments (red)
+function offsetPoint(pose, dist) {
+  const n = toolNormal(pose);
+  return new THREE.Vector3(pose[0] + dist * n.x,
+                           pose[1] + dist * n.y,
+                           pose[2] + dist * n.z);
+}
 
-    let prevEnd = null;
-    lastStrokes.forEach((stroke, si) => {
-      if (stroke.length === 0) return;
-      const flags = reachFlags && reachFlags[si] ? reachFlags[si] : null;
+/* Same envelope test as reach.py, but applied to the OFFSET waypoint
+   positions, so colors reflect where the TCP will actually be at run time. */
+function outOfReach(v) {
+  return v.length() > execViz.reach_m ||
+         Math.hypot(v.x, v.y) < execViz.min_reach_m;
+}
 
-      // Travel segment from previous stroke end to this stroke start
-      if (prevEnd) {
-        const startPt = new THREE.Vector3(stroke[0][0], stroke[0][1], stroke[0][2]);
-        const tGeo = new THREE.BufferGeometry().setFromPoints([prevEnd, startPt]);
-        pathGroup.add(new THREE.Line(tGeo, travelMat));
-      }
+function readExecOffsetM() {
+  return (parseFloat(document.getElementById("exec-offset").value) || 0) / 1000;
+}
+function readExecSafetyM() {
+  return (parseFloat(document.getElementById("exec-safety").value) || 50) / 1000;
+}
 
-      // Draw segments — red where either endpoint is outside estimated reach.
-      for (let i = 0; i + 1 < stroke.length; i++) {
-        const bad = flags && (flags[i] || flags[i + 1]);
-        const bucket = bad ? badPts : okPts;
-        bucket.push(new THREE.Vector3(stroke[i][0], stroke[i][1], stroke[i][2]),
-                    new THREE.Vector3(stroke[i + 1][0], stroke[i + 1][1], stroke[i + 1][2]));
-      }
-
-      prevEnd = new THREE.Vector3(stroke[stroke.length - 1][0],
-                                  stroke[stroke.length - 1][1],
-                                  stroke[stroke.length - 1][2]);
-    });
-
-    if (okPts.length) {
-      const geo = new THREE.BufferGeometry().setFromPoints(okPts);
-      pathGroup.add(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0x00e5a0 })));
-    }
-    if (badPts.length) {
-      const geo = new THREE.BufferGeometry().setFromPoints(badPts);
-      pathGroup.add(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0xff4444 })));
-    }
-    scene.add(pathGroup);
-  }
-
+/* Entry point: store the capture payload and (re)build all preview layers. */
+function setPathData(strokes, skeleton, viz) {
+  lastStrokes  = strokes && strokes.length ? strokes : null;
+  lastSkeleton = skeleton && skeleton.length ? skeleton : null;
+  if (viz && Object.keys(viz).length) execViz = Object.assign({}, execViz, viz);
+  buildSkeletonViz();
+  rebuildToolpathViz();
   buildOrderViz(lastStrokes);
   applyPathMode();
+}
+
+function buildSkeletonViz() {
+  if (skelGroup) { scene.remove(skelGroup); skelGroup = null; }
+  if (!lastSkeleton) return;
+  skelGroup = new THREE.Group();
+  const mat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 });
+  lastSkeleton.forEach(s => {
+    if (s.length < 2) return;
+    const geo = new THREE.BufferGeometry().setFromPoints(
+      s.map(p => new THREE.Vector3(p[0], p[1], p[2])));
+    skelGroup.add(new THREE.Line(geo, mat));
+  });
+  scene.add(skelGroup);
+}
+
+/* Corner-blended colored segments for one stroke: interior corners are
+   trimmed by the movep blend radius and rounded with a small quadratic arc —
+   the shape the controller actually drives. Pushes [a,b] segment pairs. */
+function pushBlendedStroke(pts, flags, blend, okPts, badPts) {
+  const n = pts.length;
+  if (n < 2) return;
+  const starts = pts.slice(0, n - 1);
+  const ends   = pts.slice(1);
+  for (let j = 1; j < n - 1; j++) {
+    const dIn  = pts[j].clone().sub(pts[j - 1]);
+    const dOut = pts[j + 1].clone().sub(pts[j]);
+    const r = Math.min(blend, dIn.length() / 2, dOut.length() / 2);
+    if (r <= 1e-6) continue;
+    const a = pts[j].clone().addScaledVector(dIn.normalize(), -r);
+    const b = pts[j].clone().addScaledVector(dOut.normalize(), r);
+    ends[j - 1] = a;
+    starts[j]   = b;
+    const bucket = flags[j] ? badPts : okPts;   // corner takes the waypoint's flag
+    let prev = a;
+    for (let k = 1; k <= 4; k++) {              // quadratic bezier a → corner → b
+      const t = k / 4, u = 1 - t;
+      const q = new THREE.Vector3(
+        u * u * a.x + 2 * u * t * pts[j].x + t * t * b.x,
+        u * u * a.y + 2 * u * t * pts[j].y + t * t * b.y,
+        u * u * a.z + 2 * u * t * pts[j].z + t * t * b.z);
+      bucket.push(prev, q);
+      prev = q;
+    }
+  }
+  for (let i = 0; i < n - 1; i++) {
+    const bucket = (flags[i] || flags[i + 1]) ? badPts : okPts;
+    bucket.push(starts[i], ends[i]);
+  }
+}
+
+function makeDots(positions, color, size) {
+  const geo = new THREE.BufferGeometry().setFromPoints(positions);
+  return new THREE.Points(geo, new THREE.PointsMaterial({ color, size, sizeAttenuation: true }));
+}
+
+function rebuildToolpathViz() {
+  if (pathGroup) { scene.remove(pathGroup); pathGroup = null; }
+  if (!lastStrokes) return;
+
+  const off    = readExecOffsetM();
+  const safety = readExecSafetyM();
+  const blend  = execViz.blend_m || 0.0005;
+
+  pathGroup = new THREE.Group();
+  const okPts = [], badPts = [];           // colored draw segments
+  const wpOk = [], wpBad = [];             // waypoint dots
+  const safetyPts = [], travelPts = [];    // retract markers + pen-up moves
+
+  let prevSafety = null;
+  lastStrokes.forEach(stroke => {
+    if (!stroke.length) return;
+    const pts   = stroke.map(p => offsetPoint(p, off));
+    const flags = pts.map(v => (outOfReach(v) ? 1 : 0));
+
+    // Safety (retract) points off the stroke start/end along the tool axis —
+    // where the executor's approach/lift movel targets actually are.
+    const sStart = offsetPoint(stroke[0], off + safety);
+    const sEnd   = offsetPoint(stroke[stroke.length - 1], off + safety);
+    safetyPts.push(sStart, sEnd);
+
+    if (prevSafety) travelPts.push(prevSafety, sStart);   // pen-up travel
+    travelPts.push(sStart, pts[0]);                       // approach descend
+    pushBlendedStroke(pts, flags, blend, okPts, badPts);
+    travelPts.push(pts[pts.length - 1], sEnd);            // lift after stroke
+    prevSafety = sEnd;
+
+    pts.forEach((v, i) => (flags[i] ? wpBad : wpOk).push(v));
+  });
+
+  if (travelPts.length)
+    pathGroup.add(new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints(travelPts),
+      new THREE.LineBasicMaterial({ color: 0x444466 })));
+  if (okPts.length)
+    pathGroup.add(new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints(okPts),
+      new THREE.LineBasicMaterial({ color: 0x00e5a0 })));
+  if (badPts.length)
+    pathGroup.add(new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints(badPts),
+      new THREE.LineBasicMaterial({ color: 0xff4444 })));
+  if (wpOk.length)  pathGroup.add(makeDots(wpOk,  0x00e5a0, 0.004));
+  if (wpBad.length) pathGroup.add(makeDots(wpBad, 0xff4444, 0.004));
+  if (safetyPts.length) pathGroup.add(makeDots(safetyPts, 0xffb84d, 0.006));
+
+  scene.add(pathGroup);
 }
 
 /* Order overlay: a numbered label per stroke + green start / red end markers,
@@ -250,7 +422,7 @@ function applyPathMode() {
 
 /* ── End-effector sphere ────────────────────────────────────────────────── */
 const eeMat    = new THREE.MeshStandardMaterial({ color: 0x4488ff, emissive: 0x223366, roughness: 0.4 });
-const eeSphere = new THREE.Mesh(new THREE.SphereGeometry(0.014, 20, 20), eeMat);
+const eeSphere = new THREE.Mesh(new THREE.SphereGeometry(0.007, 20, 20), eeMat);
 scene.add(eeSphere);
 
 /* ── Resize handling ────────────────────────────────────────────────────── */
@@ -307,6 +479,8 @@ function connectWS() {
       handleSurfaceStatus(data);
     } else if (data.type === "save_result") {
       handleSaveResult(data);
+    } else if (data.type === "register_result") {
+      handleRegisterResult(data);
     } else if (data.type === "execution_update") {
       handleExecutionUpdate(data);
     }
@@ -326,6 +500,42 @@ function handleInit(data) {
   if (data.surface && data.surface.loaded) {
     handleSurfaceStatus(data.surface);
   }
+  restoreSessionSettings(data);
+}
+
+/* Restore this window's controls from the server's current session settings
+   (Participant Mode shares them). Without this, a reopened Developer window
+   shows the DEFAULTS — and the next slider touch would send all of them,
+   silently resetting the tuned values on the server. */
+function restoreSessionSettings(data) {
+  const d = data.detect || {};
+  const adj = d.adjustments || {};
+  adjRows().forEach((row) => {
+    const v = adj[row.dataset.key];
+    if (v !== undefined && v !== null && !Number.isNaN(parseFloat(v))) {
+      row.querySelector("input[type=range]").value = v;
+      updateAdjVal(row);
+    }
+  });
+  if (adj.detect) document.getElementById("detect-mode").value = adj.detect;
+  const c = d.crop;
+  if (c && [c.x, c.y, c.w, c.h].every(Number.isFinite)) {
+    crop = { x: c.x, y: c.y, w: c.w, h: c.h };
+    renderCrop();
+  }
+  if (Number.isFinite(d.spacing_mm)) {
+    document.getElementById("exec-spacing").value = d.spacing_mm;
+    document.getElementById("exec-spacing-val").textContent =
+      document.getElementById("exec-spacing").value + " mm";
+  }
+  const e = data.exec || {};
+  if (Number.isFinite(e.speed_pct)) {
+    document.getElementById("exec-speed").value = e.speed_pct;
+    document.getElementById("exec-speed-val").textContent =
+      document.getElementById("exec-speed").value + "%";
+  }
+  if (Number.isFinite(e.offset_mm)) document.getElementById("exec-offset").value = e.offset_mm;
+  if (Number.isFinite(e.safety_mm)) document.getElementById("exec-safety").value = e.safety_mm;
 }
 
 function applyWorkspace(ws) {
@@ -346,7 +556,7 @@ function handleCaptureResult(data) {
   document.getElementById("val-strokes").textContent = data.stroke_count;
 
   if (data.strokes && data.strokes.length > 0) {
-    buildPathViz(data.strokes, data.reach_flags);
+    setPathData(data.strokes, data.skeleton, data.exec_viz);
     setButtonsForPhase("captured");
     if (data.reach_out > 0) {
       setHeaderStatus("robot", false,
@@ -357,7 +567,7 @@ function handleCaptureResult(data) {
         `Path ready: ${data.stroke_count} strokes, ${data.point_count} points — all within estimated reach`);
     }
   } else {
-    buildPathViz(null);
+    setPathData(null, null, null);
     setButtonsForPhase("editing");
     setHeaderStatus("robot", false,
       "No grooves found — lower Groove depth / adjust detection and try again.");
@@ -394,9 +604,12 @@ function updateScene(data) {
 
 /* ── Footer update ──────────────────────────────────────────────────────── */
 let robotConnected = false;
+let autoLocked = false;   // Participant automation ON → manual pipeline locked
 
 function updateFooter(data) {
   if (typeof data.robot_connected === "boolean") robotConnected = data.robot_connected;
+  if (typeof data.freedrive === "boolean") updateRegisterFreedrive(data.freedrive);
+  if (data.participant) autoLocked = !!data.participant.auto;
 
   document.getElementById("val-phase").textContent   = data.phase || "idle";
   document.getElementById("val-strokes").textContent = data.stroke_count ?? 0;
@@ -432,6 +645,20 @@ function setButtonsForPhase(phase) {
   btnRun.disabled = !((phase === "captured" || phase === "done") && !executing);
   btnCancel.classList.toggle("hidden", !executing);
   progWrap.classList.toggle("hidden", !executing);
+
+  // Participant automation owns the pipeline while Auto is ON: grey out the
+  // manual buttons (the server refuses them too). Cancel stays live as the
+  // emergency stop. Reapplied every state tick, so toggling Auto off in the
+  // popup re-enables them within ~50 ms.
+  if (autoLocked) {
+    cap.disabled = true;
+    retake.disabled = true;
+    gen.disabled = true;
+    btnRun.disabled = true;
+  } else {
+    retake.disabled = false;
+    gen.disabled = false;
+  }
 }
 
 function setProgress(value) {
@@ -474,7 +701,7 @@ document.getElementById("btn-disconnect").addEventListener("click", () => {
   sendWS({ type: "disconnect" });
   showOverlay(false);
   stillLoaded = false;
-  buildPathViz(null);
+  setPathData(null, null, null);
   showLive();
 });
 
@@ -600,6 +827,19 @@ btnProjectCal.addEventListener("click", () => {
     "watching the sand; the projector output follows live.");
 });
 
+/* Depth-numbers reference window (Depth viewport). Opened on the 127.0.0.1
+   origin like the projection windows: it holds its own MJPEG stream, so it
+   must not compete for this tab's 6-connection pool. */
+let depthNumWin = null;
+const btnDepthNumbers = document.getElementById("btn-depth-numbers");
+
+btnDepthNumbers.addEventListener("click", () => {
+  if (depthNumWin && !depthNumWin.closed) { depthNumWin.focus(); return; }
+  depthNumWin = openProjWindow(btnDepthNumbers, "/depths", "depthNumbers",
+    "width=920,height=760",
+    "Participant Mode opened — switch Auto ON + set a trigger distance to automate the pipeline.");
+});
+
 /* ── Swap the left/right position of a row's two viewports ──────────────── */
 document.getElementById("swap-depth").addEventListener("click", () => {
   document.getElementById("row-depth").classList.toggle("swapped");
@@ -617,7 +857,7 @@ document.getElementById("btn-capture-image").addEventListener("click", () => {
 
 document.getElementById("btn-retake").addEventListener("click", () => {
   stillLoaded = false;
-  buildPathViz(null);
+  setPathData(null, null, null);
   showLive(true);
   sendWS({ type: "retake" });
   requestAdjust(true);                  // keep the live groove feed in sync with the panel
@@ -625,8 +865,30 @@ document.getElementById("btn-retake").addEventListener("click", () => {
 });
 
 document.getElementById("btn-generate").addEventListener("click", () => {
-  sendWS({ type: "generate_path", params: buildParams() });
+  sendWS({ type: "generate_path", params: buildGenerateParams() });
   setHeaderStatus("robot", true, "Generating tool path…");
+});
+
+/* Path generation params = detection params + crop + waypoint spacing (mm). */
+function readSpacing() {
+  return parseFloat(document.getElementById("exec-spacing").value) || 10;
+}
+
+function buildGenerateParams() {
+  return { ...buildParams(), spacing_mm: readSpacing() };
+}
+
+/* Spacing lives in the Path Preview bar. Update the label live; re-generate on
+   release (not every drag tick) so the path rebuilds at the new mm spacing. */
+const spacingSlider = document.getElementById("exec-spacing");
+spacingSlider.addEventListener("input", (e) => {
+  document.getElementById("exec-spacing-val").textContent = e.target.value + " mm";
+});
+spacingSlider.addEventListener("change", () => {
+  if (stillLoaded && lastStrokes) {
+    sendWS({ type: "generate_path", params: buildGenerateParams() });
+    setHeaderStatus("robot", true, "Re-generating tool path at " + readSpacing() + " mm spacing…");
+  }
 });
 
 /* ── Incoming still + preview ──────────────────────────────────────────── */
@@ -737,6 +999,88 @@ document.getElementById("btn-reset-adjust").addEventListener("click", () => {
   requestAdjust(true);
 });
 
+/* ── Save / Load detection-parameter presets ───────────────────────────────
+   Save POSTs the current slider values (readAdjustments) to the server, which
+   writes them to presets/<date_time>.json. Load lists that folder in a popup
+   and applies the chosen file back onto the sliders. */
+document.getElementById("btn-save-adjust").addEventListener("click", async () => {
+  try {
+    const res = await fetch("/presets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ params: readAdjustments() }),
+    });
+    const data = await res.json();
+    if (data.ok) setHeaderStatus("robot", true, "✓ Parameters saved to presets/" + data.name);
+    else setHeaderStatus("robot", false, "Save failed: " + (data.error || "unknown error"));
+  } catch (err) {
+    setHeaderStatus("robot", false, "Save failed (server unreachable).");
+  }
+});
+
+const presetOverlay = document.getElementById("preset-overlay");
+const presetList    = document.getElementById("preset-list");
+
+document.getElementById("btn-load-adjust").addEventListener("click", openPresetPopup);
+document.getElementById("btn-preset-close").addEventListener("click", closePresetPopup);
+presetOverlay.addEventListener("click", (e) => {
+  if (e.target === presetOverlay) closePresetPopup();   // click backdrop to dismiss
+});
+
+function closePresetPopup() { presetOverlay.classList.add("hidden"); }
+
+async function openPresetPopup() {
+  presetList.innerHTML = "<li class='preset-empty'>Loading…</li>";
+  presetOverlay.classList.remove("hidden");
+  try {
+    const res = await fetch("/presets");
+    const items = (await res.json()).presets || [];
+    if (!items.length) {
+      presetList.innerHTML = "<li class='preset-empty'>No saved parameters yet — use Save first.</li>";
+      return;
+    }
+    presetList.innerHTML = "";
+    items.forEach((it) => {
+      const li = document.createElement("li");
+      li.className = "preset-item";
+      const name = document.createElement("span");
+      name.className = "preset-name";
+      name.textContent = it.name;
+      const time = document.createElement("span");
+      time.className = "preset-time";
+      time.textContent = it.saved || "";
+      li.append(name, time);
+      li.addEventListener("click", () => applyPreset(it.name));
+      presetList.appendChild(li);
+    });
+  } catch (err) {
+    presetList.innerHTML = "<li class='preset-empty'>Could not list saved files.</li>";
+  }
+}
+
+async function applyPreset(name) {
+  try {
+    const res = await fetch("/presets/" + encodeURIComponent(name));
+    const data = await res.json();
+    if (!data.ok) { setHeaderStatus("robot", false, "Load failed: " + (data.error || "?")); return; }
+    const p = data.params || {};
+    adjRows().forEach((row) => {
+      const key = row.dataset.key;
+      const v = p[key];
+      if (v !== undefined && v !== null && !Number.isNaN(parseFloat(v))) {
+        row.querySelector("input[type=range]").value = v;
+        updateAdjVal(row);
+      }
+    });
+    if (p.detect) document.getElementById("detect-mode").value = p.detect;
+    requestAdjust(true);
+    closePresetPopup();
+    setHeaderStatus("robot", true, "✓ Parameters loaded from presets/" + name);
+  } catch (err) {
+    setHeaderStatus("robot", false, "Load failed (server unreachable).");
+  }
+}
+
 document.getElementById("btn-crop-reset").addEventListener("click", () => {
   crop = { x: 0, y: 0, w: 1, h: 1 };
   renderCrop();
@@ -760,6 +1104,158 @@ function handleReferenceStatus(data) {
   setHeaderStatus("robot", true, data.message || "");
   // Re-run detection so the change is reflected immediately (live or captured).
   requestAdjust(true);
+}
+
+/* ── Register Corner → TCP (touch-off surface placement) ──────────────────
+   Optional popup: pick a numbered mesh corner (markers appear in the Path
+   Preview), freedrive the tool tip onto the physical corner, confirm — the
+   server recomputes the surface pose (1-point: translation only) and the
+   sliders/preview update via the normal surface_status broadcast. Closing
+   the popup without confirming changes nothing. */
+const regOverlay = document.getElementById("register-overlay");
+const regList    = document.getElementById("register-list");
+const btnRegFreedrive = document.getElementById("btn-register-freedrive");
+const btnRegConfirm   = document.getElementById("btn-register-confirm");
+let regFreedrive = false;   // mirrors shared_state.freedrive (state broadcast)
+
+document.getElementById("btn-register").addEventListener("click", openRegisterPopup);
+document.getElementById("btn-register-close").addEventListener("click", closeRegisterPopup);
+
+function regStatus(msg) { document.getElementById("register-status").textContent = msg; }
+
+function openRegisterPopup() {
+  if (!surfaceCorners.length) {
+    setHeaderStatus("robot", false, "Load a surface first — registration places the loaded mesh.");
+    return;
+  }
+  selectedCorner = -1;
+  hoveredCorner = -1;
+  buildRegisterList();
+  updateCornerHighlight();
+  btnRegConfirm.disabled = true;
+  if (cornerGroup) cornerGroup.visible = true;
+  regOverlay.classList.remove("hidden");
+  regStatus(robotConnected
+    ? `Pick a corner: click a numbered marker in the Path Preview, or a row below.`
+    : "Robot NOT connected — you can look at the corners, but freedrive/confirm need a connection.");
+}
+
+function closeRegisterPopup() {
+  regOverlay.classList.add("hidden");
+  if (cornerGroup) cornerGroup.visible = false;
+  hoveredCorner = -1;
+  canvas.style.cursor = "";
+  // Never leave the arm limp behind a closed popup.
+  if (regFreedrive) sendWS({ type: "register_freedrive", params: { on: false } });
+}
+
+function selectCorner(i) {
+  selectedCorner = i;
+  [...regList.children].forEach((el, j) => el.classList.toggle("sel", j === i));
+  updateCornerHighlight();
+  btnRegConfirm.disabled = !robotConnected;
+  regStatus(`Corner ${i + 1} selected (green in the preview). Freedrive the tool tip onto it, then Confirm.`);
+}
+
+function setHoveredCorner(i) {
+  if (i === hoveredCorner) return;
+  hoveredCorner = i;
+  updateCornerHighlight();
+  // Mirror the preview hover into the list, so both views always agree.
+  [...regList.children].forEach((el, j) => el.classList.toggle("hov", j === i));
+}
+
+function buildRegisterList() {
+  regList.innerHTML = "";
+  surfaceCorners.forEach((c, i) => {
+    const li = document.createElement("li");
+    li.className = "preset-item";
+    const name = document.createElement("span");
+    name.className = "preset-name";
+    name.textContent = `Corner ${i + 1}`;
+    const pos = document.createElement("span");
+    pos.className = "preset-time";
+    pos.textContent = `local ${c.map(v => v.toFixed(3)).join(", ")} m`;
+    li.append(name, pos);
+    li.addEventListener("click", () => selectCorner(i));
+    // Hovering a row highlights that marker in the Path Preview (cyan, larger).
+    li.addEventListener("mouseenter", () => setHoveredCorner(i));
+    li.addEventListener("mouseleave", () => setHoveredCorner(-1));
+    regList.appendChild(li);
+  });
+}
+
+/* ── Pick corners directly in the Path Preview ────────────────────────────
+   While the register dialog is open, hovering near a marker highlights it
+   (and its list row); a click — not an orbit drag — selects it. Picking is
+   screen-space: nearest projected marker within a pixel radius, which stays
+   easy to hit regardless of zoom. */
+const REG_PICK_PX = 22;
+
+function pickCorner(e) {
+  if (!cornerGroup || !cornerGroup.visible) return -1;
+  const rect = canvas.getBoundingClientRect();
+  const px = e.clientX - rect.left, py = e.clientY - rect.top;
+  const v = new THREE.Vector3();
+  let best = -1, bestD = REG_PICK_PX;
+  cornerMeshes.forEach((m, i) => {
+    m.getWorldPosition(v);
+    v.project(camera);
+    if (v.z > 1) return;                       // behind the camera
+    const sx = (v.x * 0.5 + 0.5) * rect.width;
+    const sy = (-v.y * 0.5 + 0.5) * rect.height;
+    const d = Math.hypot(sx - px, sy - py);
+    if (d < bestD) { bestD = d; best = i; }
+  });
+  return best;
+}
+
+let regPtrDown = null;
+canvas.addEventListener("pointermove", (e) => {
+  if (!cornerGroup || !cornerGroup.visible) return;
+  const h = pickCorner(e);
+  setHoveredCorner(h);
+  canvas.style.cursor = h >= 0 ? "pointer" : "";
+});
+canvas.addEventListener("pointerdown", (e) => {
+  regPtrDown = [e.clientX, e.clientY];
+});
+canvas.addEventListener("pointerup", (e) => {
+  if (!cornerGroup || !cornerGroup.visible || !regPtrDown) { regPtrDown = null; return; }
+  const moved = Math.hypot(e.clientX - regPtrDown[0], e.clientY - regPtrDown[1]);
+  regPtrDown = null;
+  if (moved > 5) return;                       // that was an orbit/pan drag
+  const i = pickCorner(e);
+  if (i >= 0) selectCorner(i);
+});
+
+btnRegFreedrive.addEventListener("click", () => {
+  if (!robotConnected) { regStatus("Robot not connected."); return; }
+  sendWS({ type: "register_freedrive", params: { on: !regFreedrive } });
+});
+
+btnRegConfirm.addEventListener("click", () => {
+  if (selectedCorner < 0 || !robotConnected) return;
+  btnRegConfirm.disabled = true;
+  regStatus("Registering — reading TCP…");
+  sendWS({ type: "register_corner", params: { corner_index: selectedCorner } });
+});
+
+function handleRegisterResult(data) {
+  if (data.success) {
+    closeRegisterPopup();
+    setHeaderStatus("robot", true, "✓ " + (data.message || "Corner registered."));
+  } else {
+    btnRegConfirm.disabled = selectedCorner < 0 || !robotConnected;
+    regStatus("Failed: " + (data.error || "unknown error"));
+  }
+}
+
+/* Keep the freedrive toggle button in sync with the robot (state broadcast). */
+function updateRegisterFreedrive(on) {
+  regFreedrive = !!on;
+  btnRegFreedrive.textContent = regFreedrive ? "Freedrive ON — click to stop" : "Start Freedrive";
+  btnRegFreedrive.classList.toggle("active", regFreedrive);
 }
 
 /* ── Target surface (3D projection) ─────────────────────────────────────── */
@@ -838,6 +1334,12 @@ function handleSurfaceStatus(data) {
     showOverlay(false);   // surface replaces the P0/Px/Py calibration
   } else {
     if (surfaceGroup) { scene.remove(surfaceGroup); surfaceGroup = null; }
+    cornerGroup = null;             // children of surfaceGroup — gone with it
+    cornerMeshes = [];
+    surfaceCorners = [];
+    selectedCorner = -1;
+    hoveredCorner = -1;
+    canvas.style.cursor = "";
     status.textContent = "No surface loaded.";
   }
   if (data.message) setHeaderStatus("robot", true, data.message);
@@ -1028,6 +1530,33 @@ document.getElementById("btn-run").addEventListener("click", () => {
 document.getElementById("exec-speed").addEventListener("input", (e) => {
   document.getElementById("exec-speed-val").textContent = e.target.value + "%";
 });
+
+/* Offset / Safety change the run-time toolpath geometry (lift along the tool
+   axis + retract points), so the preview rebuilds client-side on every edit. */
+let execVizTimer = null;
+["exec-offset", "exec-safety"].forEach((id) => {
+  document.getElementById(id).addEventListener("input", () => {
+    if (execVizTimer) clearTimeout(execVizTimer);
+    execVizTimer = setTimeout(rebuildToolpathViz, 100);
+  });
+});
+
+/* Keep the server's session copy of the exec-bar values fresh so Participant
+   Mode uses what this window shows — no Run/Save needed to 'commit' them —
+   and a reopened window restores them (init.exec / init.detect). */
+let execSyncTimer = null;
+function syncExecParams() {
+  if (execSyncTimer) clearTimeout(execSyncTimer);
+  execSyncTimer = setTimeout(() => sendWS({ type: "set_exec_params", params: {
+    speed_pct: parseFloat(document.getElementById("exec-speed").value) || 5,
+    offset_mm: parseFloat(document.getElementById("exec-offset").value) || 0,
+    safety_mm: parseFloat(document.getElementById("exec-safety").value) || 50,
+    spacing_mm: readSpacing(),
+  }}), 300);
+}
+["exec-speed", "exec-offset", "exec-safety"].forEach((id) =>
+  document.getElementById(id).addEventListener("input", syncExecParams));
+spacingSlider.addEventListener("change", syncExecParams);
 
 /* ── Save toolpath (URScript + JSON + preview image) ────────────────────── */
 document.getElementById("btn-save-path").addEventListener("click", () => {

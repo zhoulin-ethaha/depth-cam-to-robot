@@ -110,6 +110,43 @@ class TestMoveTo:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# move_process_path (movep drawing)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_WAYPOINTS = [[0.1, 0.2, 0.3, 0.0, 3.14, 0.0],
+              [0.15, 0.2, 0.3, 0.0, 3.14, 0.0]]
+
+
+class TestMoveProcessPath:
+
+    def test_launches_async_move_path_and_polls_to_completion(self):
+        with _connected_robot() as (rc, rtde_c, _):
+            rtde_c.getAsyncOperationProgress.return_value = -1   # finished
+            rc.move_process_path(_WAYPOINTS, 0.05, 0.3, 0.0005)
+            rtde_c.movePath.assert_called_once()
+            # asynchronous=True so the lock is released while polling
+            assert rtde_c.movePath.call_args[0][1] is True
+            assert rtde_c.getAsyncOperationProgress.called
+
+    def test_cancel_event_stops_motion(self):
+        with _connected_robot() as (rc, rtde_c, _):
+            rtde_c.getAsyncOperationProgress.return_value = 10   # still running
+            cancel = threading.Event()
+            cancel.set()
+            rc.move_process_path(_WAYPOINTS, 0.05, 0.3, 0.0005, cancel)
+            rtde_c.stopL.assert_called_once_with(2.0)
+
+    def test_silent_when_not_connected(self):
+        rc = RobotController()
+        rc.move_process_path(_WAYPOINTS, 0.05, 0.3, 0.0005)  # must not raise
+
+    def test_empty_waypoints_is_noop(self):
+        with _connected_robot() as (rc, rtde_c, _):
+            rc.move_process_path([], 0.05, 0.3, 0.0005)
+            rtde_c.movePath.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # stop_motion
 # ─────────────────────────────────────────────────────────────────────────────
 
