@@ -177,6 +177,49 @@ class TestVerticalInFile:
         assert abs(_vertical_plane().drawing_mm_per_px(W, H) - 0.625) < 1e-6
 
 
+class TestDrawSideFacesRobot:
+    """A steep surface is drawn on the side facing the robot base, wherever the
+    pose puts it: positive offset always moves the TCP toward the robot and the
+    tool approaches from the robot's side. Horizontal surfaces never flip."""
+
+    @staticmethod
+    def _outward(pose6):
+        return -Rotation.from_rotvec(pose6[3:6]).apply([0.0, 0.0, 1.0])
+
+    def test_wall_on_plus_y_keeps_authored_side(self):
+        # Authored normals (−Y) already face the robot from +Y.
+        model = _vertical_plane()
+        pose = SurfacePose(tx=-0.2, ty=0.8, tz=0.0)
+        assert model.draw_side_flip(pose) is False
+        out = model.project_strokes([[(320, 240), (400, 240)]], W, H, pose,
+                                    offset_m=0.05)
+        p = out[0][0]
+        assert p[1] == pytest.approx(0.75, abs=1e-6)   # offset toward the base
+        assert self._outward(p)[1] == pytest.approx(-1.0, abs=1e-6)
+
+    def test_wall_on_minus_y_flips_to_face_robot(self):
+        # Same mesh moved to the robot's other side: the authored side now
+        # faces away, so the draw side flips toward the base.
+        model = _vertical_plane()
+        pose = SurfacePose(tx=-0.2, ty=-0.8, tz=0.0)
+        assert model.draw_side_flip(pose) is True
+        out = model.project_strokes([[(320, 240), (400, 240)]], W, H, pose,
+                                    offset_m=0.05)
+        p = out[0][0]
+        assert p[1] == pytest.approx(-0.75, abs=1e-6)  # offset toward the base
+        assert self._outward(p)[1] == pytest.approx(1.0, abs=1e-6)
+
+    def test_flat_surface_never_flips(self):
+        model = _flat_plane()
+        for tz in (-0.2, 0.0, 0.5):
+            assert model.draw_side_flip(SurfacePose(tx=0.4, tz=tz)) is False
+
+    def test_wall_centred_on_base_axis_keeps_authored_side(self):
+        # Directly over the base axis there is no robot side — keep as authored.
+        assert _vertical_plane().draw_side_flip(
+            SurfacePose(tx=-0.2, ty=0.0)) is False
+
+
 class TestMisses:
 
     def test_rays_off_the_mesh_split_the_stroke(self):

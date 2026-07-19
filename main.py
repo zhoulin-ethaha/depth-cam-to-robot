@@ -50,6 +50,8 @@ shared_state: dict = {
     "projection_clients":  0,        # connected projection windows
     "depth_overlay_clients": 0,      # connected /depths popups (gates the labels)
     "depth_labels":        None,     # [[u, v, mm], ...] for the depth-number overlay
+    "depth_labels_size":   None,     # [w, h] px of the crop the labels cover
+    "last_depth_crop_jpg": None,     # cropped colorized depth for the popup
     "workspace":           None,     # WorkspaceConfig | None — confirmed workspace
     "pending_workspace":   None,     # WorkspaceConfig | None — loaded from disk
     "ws_points":           {"p0": None, "px": None, "py": None},

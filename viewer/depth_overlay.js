@@ -6,8 +6,10 @@
                  #auto-toggle #trigger #status-chip #status-msg
 
    What it does:
-   - keeps a 4:3 stage fitted to the window, draws the server's depth-number
-     labels ([[u, v, mm], ...], full-frame 640x480 coords) over the live feed;
+   - keeps a stage fitted to the window in the CROP's aspect ratio, drawing the
+     server's depth-number labels ([[u, v, mm], ...], coords relative to the
+     Developer-Mode crop — the same region the /depth/cropped feed shows; the
+     crop size arrives with each depth_labels message) over the live feed;
    - Region-interval slider → `depth_overlay_params`; Text-size is client-side;
    - Auto toggle → `set_automation` — ON arms the automated pipeline and locks
      the manual Capture/Generate/Run buttons in Developer Mode;
@@ -17,18 +19,18 @@
      Paths/Actuating) big in the stage's top-right corner, from `state`. */
 
 (function () {
-  const SRC_W = 640, SRC_H = 480;
+  let srcW = 640, srcH = 480;   // size of the cropped region (updates with labels)
   const stage   = document.getElementById("stage");
   const canvas  = document.getElementById("overlay");
   const ctx     = canvas.getContext("2d");
   let labels = [];
 
-  /* ── Layout: keep a 4:3 stage that fits the window ──────────────────────── */
+  /* ── Layout: keep a stage in the crop's aspect that fits the window ─────── */
   function layout() {
     const wrap = document.getElementById("stage-wrap");
     const aw = wrap.clientWidth, ah = wrap.clientHeight;
-    let w = aw, h = aw * (SRC_H / SRC_W);
-    if (h > ah) { h = ah; w = ah * (SRC_W / SRC_H); }
+    let w = aw, h = aw * (srcH / srcW);
+    if (h > ah) { h = ah; w = ah * (srcW / srcH); }
     stage.style.width = w + "px";
     stage.style.height = h + "px";
     const dpr = window.devicePixelRatio || 1;
@@ -44,7 +46,7 @@
     const w = canvas.width, h = canvas.height;
     ctx.clearRect(0, 0, w, h);
     if (!labels.length) return;
-    const sx = w / SRC_W, sy = h / SRC_H;
+    const sx = w / srcW, sy = h / srcH;
     const px = parseFloat(document.getElementById("textsize").value) * dpr;
     ctx.font = `${px}px "SF Mono", "Fira Code", monospace`;
     ctx.textAlign = "center";
@@ -149,7 +151,15 @@
       const data = JSON.parse(ev.data);
       if (data.type === "depth_labels") {
         labels = data.labels || [];
-        draw();
+        // The labels' (and the feed's) crop size — re-fit the stage when the
+        // user adjusts the crop in Developer Mode.
+        const s = data.size;
+        if (s && s[0] > 0 && s[1] > 0 && (s[0] !== srcW || s[1] !== srcH)) {
+          srcW = s[0]; srcH = s[1];
+          layout();               // layout() calls draw()
+        } else {
+          draw();
+        }
       } else if (data.type === "state" || data.type === "init") {
         updateParticipant(data.participant);
       }

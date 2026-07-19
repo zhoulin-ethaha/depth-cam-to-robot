@@ -26,7 +26,7 @@ trigger run the whole pipeline automatically and lock the manual buttons.
   browser tab kills the server (deliberate, via SIGINT).
 - ALWAYS use `.venv\Scripts\python.exe`; never bare `pip` (broken launcher risk —
   use `python -m pip`). The venv is NOT relocatable.
-- Unit tests: `.venv/Scripts/python.exe -m pytest -q -m "not integration"` (218, no
+- Unit tests: `.venv/Scripts/python.exe -m pytest -q -m "not integration"` (222, no
   hardware). Integration: `-m integration`, needs RealSense/robot + TEST_ROBOT_IP.
 - No CLI modes. Hardware vs no-robot is in the UI: "Test Mode (no robot)" button
   unlocks capture with a synthetic workspace; Run stays gated on a robot connection.
@@ -52,7 +52,10 @@ trigger run the whole pipeline automatically and lock the manual buttons.
 4. **Mapping** `surface.SurfaceModel.project_strokes` — STL/OBJ (Rhino, mm→m) via
    trimesh; camera frame fitted centred (aspect kept) onto the footprint ⟂ the
    mesh's dominant normal; ray-cast; TCP ⟂ surface with minimal twist; offset
-   along outward normal. Placement = `SurfacePose` (m + XYZ euler deg, base frame),
+   along outward normal. Draw side: authored mesh normals, EXCEPT steep
+   surfaces (>~45° from horizontal) always draw on the side facing the robot
+   base wherever the pose puts them (`draw_side_flip`) — so positive offset
+   moves the TCP toward the robot and never behind a wall. Placement = `SurfacePose` (m + XYZ euler deg, base frame),
    set by UI sliders OR by corner→TCP touch-off (`registration.py`: pick a mesh
    corner — click its marker in the 3D preview or the dialog list, hover
    highlights it cyan (dialog is non-modal, preview stays visible) — then
@@ -76,14 +79,18 @@ trigger run the whole pipeline automatically and lock the manual buttons.
    `path.script` (URScript movel/movep), `path.json` (poses + per-waypoint plane:
    origin + orthonormal x/y/z axes, z = approach), `preview.png`.
 8. **Server/UI** `server.py` (aiohttp) + `viewer/` — MJPEG: /depth /rgb
-   /depth/grooves /depth/mask /depth/mask/full; WS /ws (JSON); POST /surface/upload;
+   /depth/grooves /depth/mask /depth/mask/full /depth/cropped (colorized depth
+   restricted to the Developer-Mode crop; composed only while a /depths popup
+   is connected); WS /ws (JSON); POST /surface/upload;
    GET /status (compact state JSON for tools); GET/POST /presets + GET
    /presets/{name} (Detection-Parameter slider presets → `presets/<date_time>.json`,
    gitignored; browser-only, not exposed to MCP tools); /projection (+?cal);
-   /depths (the Participant Mode popup: absolute mm-from-camera labels on the
-   live depth view + Auto toggle + trigger box + big status chip — labels
-   computed in camera_thread ONLY while a popup is connected, gated by
-   `depth_overlay_clients`, throttled DEPTH_LABELS_EVERY). viewer.js =
+   /depths (the Participant Mode popup: the CROPPED live depth view — the
+   /depth/cropped stream, same region as the skeleton/mask views — with
+   absolute mm-from-camera labels + Auto toggle + trigger box + big status
+   chip; labels computed on the crop in camera_thread ONLY while a popup is
+   connected, gated by `depth_overlay_clients`, throttled DEPTH_LABELS_EVERY;
+   the popup never changes the crop — only users adjust it in Developer Mode). viewer.js =
    Developer-Mode single-page app w/ three.js preview; projection.html =
    corner-pin homography; depth_view.html + depth_overlay.js = the popup.
 9. **Projector** — full-frame mask composed ONLY while a projection window is
@@ -94,7 +101,8 @@ trigger run the whole pipeline automatically and lock the manual buttons.
     /depths popup: an **Auto toggle** (`set_automation{on}`) + a trigger
     distance (mm, `set_trigger`); camera thread flags frames with
     ≥TRIGGER_MIN_AREA_PX valid px closer than the trigger (`trigger_below`,
-    `depth_extractor.depth_below_threshold`). Auto ON → **Auto On**; anything
+    `depth_extractor.depth_below_threshold`) — evaluated on the CROPPED
+    region only, so motion outside the popup's visible area never triggers. Auto ON → **Auto On**; anything
     below trigger → **Alerted**; frame clear for PARTICIPANT_CLEAR_S →
     **Sensing** (waits buffer refill, then capture) → **Generating Paths**
     (current Dev-Mode crop/adjustments/spacing) → **Actuating** (save_bundle,
@@ -175,7 +183,9 @@ never import `main` from these modules.
   spacing_mm}}`, `still`, `preview`, `surface_status`, `save_result`,
   `reference_status`, `execution_update`, `connection_result`,
   `register_result{success,message,pose,error}`,
-  `depth_labels{labels:[[u,v,mm],...]}` (only to /depths popups, ~4 Hz).
+  `depth_labels{labels:[[u,v,mm],...],size:[w,h]}` (only to /depths popups,
+  ~4 Hz; coords + size are relative to the Developer-Mode crop, matching the
+  /depth/cropped stream — the popup re-fits its stage from `size`).
   (`skeleton` = dense on-surface [x,y,z] polylines for the white preview line;
   `exec_viz` lets the browser rebuild the toolpath viz client-side on
   Offset/Safety edits.)
@@ -204,4 +214,4 @@ never import `main` from these modules.
 - The browser preview reads the Radius slider directly (`readBlendMm()` →
   `rebuildToolpathViz`); `exec_viz.blend_m` from capture_result is only the
   session echo.
-- Test count reference: 218 unit (+6 hardware-gated). Keep green.
+- Test count reference: 222 unit (+6 hardware-gated). Keep green.

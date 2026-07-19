@@ -298,6 +298,12 @@ pulls their hand out, and the robot retraces the grooves — no clicks.
 900 mm → enter 700), then switch the **Auto** toggle **ON**. The automation
 cycles through these statuses, shown **large in the popup's top-right corner**:
 
+The popup's depth view shows **only the cropped region** selected in the
+Developer-Mode Depth viewport — the same region the Skeleton and Mask views
+show and the same region paths are generated from. The depth numbers and the
+trigger watch that region too. The crop itself can only be changed by dragging
+it in Developer Mode; opening or using the popup never alters it.
+
 | Status | Meaning |
 |---|---|
 | **Auto Off** | Toggle off — the popup is just the depth-number viewport. |
@@ -342,6 +348,10 @@ on a real connection.
    may be modelled **flat, tilted, or vertical** — projection follows the mesh's
    dominant (area-weighted average) face normal, and the drawing lands on the side
    the normals point (flip them in Rhino with `Dir` if the paths appear on the back).
+   Exception: a **steep surface** (more than ~45° from horizontal) is always drawn
+   on the **side facing the robot base**, wherever the placement sliders put it —
+   so a wall works on any side of the robot, a positive TCP offset always moves
+   the tool *toward* the robot, and the tool never tries to approach from behind.
 2. The full camera frame (4:3) is **fitted centred** onto the surface's footprint,
    aspect preserved — so each stroke lands at the same relative position it has in
    the camera view, and the scale is fixed by the surface size (frame width ↦

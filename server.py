@@ -134,6 +134,7 @@ class Server:
         app.router.add_get("/status", self._handle_status)
         app.router.add_get("/projection", self._handle_projection_page)
         app.router.add_get("/depths", self._handle_depths_page)
+        app.router.add_get("/depth/cropped", self._handle_depth_cropped)
         app.router.add_get("/depth/mask/full", self._handle_mask_full)
         app.router.add_get("/projection/corners", self._handle_corners_get)
         app.router.add_post("/projection/corners", self._handle_corners_post)
@@ -187,6 +188,11 @@ class Server:
 
     async def _handle_mask_full(self, request: web.Request) -> web.StreamResponse:
         return await self._mjpeg_stream(request, "last_mask_full_jpg")
+
+    async def _handle_depth_cropped(self, request: web.Request) -> web.StreamResponse:
+        """Colorized depth restricted to the Developer-Mode crop — the
+        Participant popup's view (composed only while a popup is connected)."""
+        return await self._mjpeg_stream(request, "last_depth_crop_jpg")
 
     async def _handle_status(self, request: web.Request) -> web.Response:
         """Compact app state for external tools (MCP): one JSON object."""
@@ -549,9 +555,13 @@ class Server:
             if self._overlay_clients:
                 with self._lock:
                     labels = self._state.get("depth_labels")
+                    size = self._state.get("depth_labels_size")
                 if labels is not None and labels is not self._last_labels:
                     self._last_labels = labels
-                    lmsg = json.dumps({"type": "depth_labels", "labels": labels})
+                    # ``size`` = [w, h] px of the cropped region the labels
+                    # (and the /depth/cropped stream) cover.
+                    lmsg = json.dumps({"type": "depth_labels", "labels": labels,
+                                       "size": size})
                     for client in list(self._overlay_clients):
                         try:
                             await client.send_str(lmsg)

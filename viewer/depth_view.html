@@ -68,7 +68,9 @@
 
   <div id="stage-wrap">
     <div id="stage">
-      <img id="feed" src="/depth" alt="depth feed" />
+      <!-- Cropped stream: the popup shows exactly the Developer-Mode crop
+           (like the skeleton/mask views), never the full frame. -->
+      <img id="feed" src="/depth/cropped" alt="depth feed" />
       <canvas id="overlay"></canvas>
       <div id="status-wrap">
         <div id="status-chip" class="chip-off">Auto Off</div>

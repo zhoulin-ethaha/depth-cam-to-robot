@@ -170,6 +170,15 @@ class DepthCameraThread:
                 color = colorize_depth(z, ok, params.near_m, params.far_m)
                 ok_color, color_jpg = cv2.imencode(".jpg", color, [cv2.IMWRITE_JPEG_QUALITY, 80])
 
+                # Participant popup: the SAME colorized depth but restricted to
+                # the Developer-Mode crop, so the popup shows exactly the
+                # region paths are generated from (like the skeleton/mask
+                # views). Composed only while a popup is connected; the popup
+                # never changes the crop — only users adjust it.
+                with self._state_lock:
+                    overlay_on = self._state.get("depth_overlay_clients", 0) > 0
+                crop_jpg = encode_jpeg(color[y0:y1, x0:x1]) if overlay_on else None
+
                 # Aligned RGB: buffer the FULL frame for Capture, but serve the
                 # live "rgb" view CROPPED so only the selected region shows.
                 rgb = np.asarray(color_frame.get_data()) if color_frame else None
@@ -206,26 +215,33 @@ class DepthCameraThread:
                 # Depth-number overlay labels: computed ONLY while a /depths
                 # popup is connected (zero overhead otherwise), throttled
                 # harder than the groove preview — it's a reference display.
+                # Labels cover the CROPPED region only (coords relative to the
+                # crop, matching the popup's cropped depth stream).
                 if frame_i % DEPTH_LABELS_EVERY == 0:
-                    with self._state_lock:
-                        overlay_on = self._state.get("depth_overlay_clients", 0) > 0
-                    labels = (depth_region_labels(z, ok, self._label_interval_mm)
+                    labels = (depth_region_labels(z[y0:y1, x0:x1], ok[y0:y1, x0:x1],
+                                                  self._label_interval_mm)
                               if overlay_on else None)
                     with self._state_lock:
                         self._state["depth_labels"] = labels
+                        self._state["depth_labels_size"] = (
+                            [x1 - x0, y1 - y0] if labels is not None else None)
                 frame_i += 1
 
                 # Participant-Mode trigger: is anything closer than the
                 # threshold? One vectorized compare per frame — cheap enough
                 # to run unthrottled so the automation reacts promptly.
+                # Watches ONLY the cropped region — the popup shows just the
+                # crop, so motion outside it must not arm/hold the trigger.
                 thr = self._trigger_mm
-                trigger_below = depth_below_threshold(z, ok, thr) if thr is not None else None
+                trigger_below = (depth_below_threshold(z[y0:y1, x0:x1], ok[y0:y1, x0:x1], thr)
+                                 if thr is not None else None)
                 with self._state_lock:
                     self._state["trigger_below"] = trigger_below
 
                 if ok_color:
                     with self._state_lock:
                         self._state["last_depth_color_jpg"] = color_jpg.tobytes()
+                        self._state["last_depth_crop_jpg"] = crop_jpg
                         self._state["last_rgb_jpg"] = rgb_jpg
                         self._state["last_groove_jpg"] = last_groove_jpg
                         self._state["last_mask_jpg"] = last_mask_jpg
@@ -240,11 +256,13 @@ class DepthCameraThread:
             pipe.stop()
             with self._state_lock:
                 self._state["last_depth_color_jpg"] = None
+                self._state["last_depth_crop_jpg"] = None
                 self._state["last_rgb_jpg"] = None
                 self._state["last_groove_jpg"] = None
                 self._state["last_mask_jpg"] = None
                 self._state["last_mask_full_jpg"] = None
                 self._state["depth_labels"] = None
+                self._state["depth_labels_size"] = None
                 self._state["trigger_below"] = None
             with self._frame_lock:
                 self._buffer.clear()

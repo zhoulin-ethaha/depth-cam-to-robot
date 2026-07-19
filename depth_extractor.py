@@ -363,8 +363,9 @@ def depth_region_labels(
     """
     Labels for the depth-number overlay popup: quantize depth into bands
     ``interval_mm`` wide, find each band's connected regions, and return one
-    ``[u, v, depth_mm]`` per region at its centroid (u/v in FULL-frame pixels,
-    depth_mm = the band's centre distance from the camera).
+    ``[u, v, depth_mm]`` per region at its centroid (u/v in pixels of the
+    given ``depth_m`` array — the caller passes the cropped region, so labels
+    are crop-relative; depth_mm = the band's centre distance from the camera).
 
     Reference display only — never feeds path generation. Runs at half
     resolution for speed; regions smaller than ``min_area_px`` (half-res px)

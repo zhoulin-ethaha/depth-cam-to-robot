@@ -16,8 +16,11 @@ Frames and conventions
     • The 2D drawing (full camera frame, aspect W:H) is fitted centred onto the
       surface's footprint and projected along the mesh's dominant (average)
       face normal — so the surface may be modelled flat, tilted, or vertical in
-      the file; the draw side is wherever its normals point. "Up" in the image
-      maps as close to the mesh's local +Z as the orientation allows.
+      the file; the draw side is wherever its normals point, EXCEPT that a
+      steep surface (>~45° from horizontal) always gets drawn on the side
+      facing the robot base, wherever the pose places it (see draw_side_flip).
+      "Up" in the image maps as close to the mesh's local +Z as the
+      orientation allows.
     • Tool orientation: tool Z approaches along the inward normal (−n), with
       the tool X chained point-to-point for minimal twist so the wrist doesn't
       flip mid-stroke. Orientations are UR rotation vectors.
@@ -129,7 +132,34 @@ class SurfaceModel:
             },
         }
 
-    def drawing_frame(self):
+    def _dominant_normal(self) -> np.ndarray:
+        """Area-weighted average face normal (LOCAL frame, unit length)."""
+        areas = self.mesh.area_faces
+        n_avg = (self.mesh.face_normals * areas[:, None]).sum(axis=0)
+        n_len = np.linalg.norm(n_avg)
+        return n_avg / n_len if n_len > 1e-9 else np.array([0.0, 0.0, 1.0])
+
+    def draw_side_flip(self, pose: SurfacePose) -> bool:
+        """
+        Should the draw side be flipped so it faces the robot? The mesh's
+        authored normals pick a draw side that knows nothing about where the
+        surface is PLACED — a wall that faced the robot from +Y faces away once
+        moved to −Y. The robot can only work the side of a steep surface that
+        faces its base, so: for surfaces tilted more than ~45° from horizontal,
+        flip when the authored draw side points away from the base axis
+        (horizontally). Horizontal-ish surfaces always keep the authored side
+        (the classic sandbox top), as does a wall centred on the base axis.
+        """
+        m = pose.matrix()
+        w_base = m[:3, :3] @ self._dominant_normal()
+        if np.hypot(w_base[0], w_base[1]) < 0.7071:      # < ~45° from horizontal
+            return False
+        c_base = m[:3, :3] @ self.mesh.centroid + m[:3, 3]
+        if np.hypot(c_base[0], c_base[1]) < 1e-6:        # centred on the base axis
+            return False
+        return float(w_base[:2] @ c_base[:2]) > 0.0      # points away from base
+
+    def drawing_frame(self, flip: bool = False):
         """
         The projection frame, derived from the mesh itself so the surface may be
         modelled in ANY orientation (flat, tilted, vertical): rays are cast along
@@ -137,14 +167,15 @@ class SurfaceModel:
         span the drawing plane, with ``v`` chosen as close to local +Z as
         possible so "up in the image" means "up on the surface". For a flat
         horizontal mesh this reduces to the classic u=X, v=Y, w=Z mapping.
+        ``flip`` mirrors the draw side (see draw_side_flip) — ``u`` follows so
+        the image reads correctly from the new side.
 
         Returns (u, v, w, u0, v0, bw, bh, w_max): unit axes, in-plane bbox
         origin/extents, and the highest w-coordinate (ray start height).
         """
-        areas = self.mesh.area_faces
-        n_avg = (self.mesh.face_normals * areas[:, None]).sum(axis=0)
-        n_len = np.linalg.norm(n_avg)
-        w = n_avg / n_len if n_len > 1e-9 else np.array([0.0, 0.0, 1.0])
+        w = self._dominant_normal()
+        if flip:
+            w = -w
 
         v = np.array([0.0, 0.0, 1.0]) - w[2] * w         # local Z projected ⊥ w
         if np.linalg.norm(v) < 1e-3:                     # horizontal surface →
@@ -209,8 +240,11 @@ class SurfaceModel:
             return []
 
         # Projection frame from the mesh's own dominant normal, so the surface
-        # may be modelled flat, tilted, or vertical in the file.
-        u, v, w, u0, v0, bw, bh, w_max = self.drawing_frame()
+        # may be modelled flat, tilted, or vertical in the file — with the draw
+        # side flipped toward the robot when the POSE puts a steep surface's
+        # authored side facing away (offset/TCP must approach from the robot).
+        u, v, w, u0, v0, bw, bh, w_max = self.drawing_frame(
+            flip=self.draw_side_flip(pose))
         if bw < 1e-9 or bh < 1e-9:
             return []
 
