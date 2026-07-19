@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -44,13 +45,32 @@ def _retract(pose: Pose, dist: float) -> Pose:
     return _offset_pose(pose, dist)   # retract = move outward along the normal
 
 
+def stroke_blend(waypoints: Strokes, blend_m: float) -> float:
+    """
+    Clamp a requested movep blend radius for one stroke: the UR controller
+    rejects a path when a blend reaches half the distance to the next waypoint,
+    and resampling can leave one short tail segment, so cap at 45% of the
+    stroke's SHORTEST segment. Shared by the live executor and the URScript
+    export so both actuate identically.
+    """
+    blend = max(float(blend_m), 0.0)
+    if blend <= 0.0 or len(waypoints) < 2:
+        return blend
+    min_seg = min(
+        math.dist(a[:3], b[:3]) for a, b in zip(waypoints, waypoints[1:])
+    )
+    return min(blend, 0.45 * min_seg)
+
+
 # ── URScript ──────────────────────────────────────────────────────────────────
 def build_urscript(strokes: Strokes, speed: float, safety: float,
-                   header: str = "", name: str = "draw_path") -> str:
+                   header: str = "", name: str = "draw_path",
+                   blend_m: float = MOVEP_BLEND_M) -> str:
     """
     URScript program: for each stroke, retract-approach → start → movep through
     the waypoints → retract. ``speed`` m/s is used for travels and drawing so the
-    motion is uniform; ``safety`` m is the retract distance along the tool axis.
+    motion is uniform; ``safety`` m is the retract distance along the tool axis;
+    ``blend_m`` is the movep corner radius (clamped per stroke by stroke_blend).
     """
     def ps(p: Pose) -> str:
         return "p[" + ", ".join(f"{v:.5f}" for v in p) + "]"
@@ -63,11 +83,12 @@ def build_urscript(strokes: Strokes, speed: float, safety: float,
     for si, s in enumerate(strokes):
         if len(s) < 1:
             continue
+        r = stroke_blend(s, blend_m)
         lines.append(f"  # stroke {si + 1} ({len(s)} pts)")
         lines.append(f"  movel({ps(_retract(s[0], safety))}, a={ta:.3f}, v={speed:.4f})")
         lines.append(f"  movel({ps(s[0])}, a={ta:.3f}, v={speed:.4f})")
         for p in s[1:]:
-            lines.append(f"  movep({ps(p)}, a={da:.3f}, v={speed:.4f}, r={MOVEP_BLEND_M:.4f})")
+            lines.append(f"  movep({ps(p)}, a={da:.3f}, v={speed:.4f}, r={r:.4f})")
         lines.append(f"  movel({ps(_retract(s[-1], safety))}, a={ta:.3f}, v={speed:.4f})")
     lines.append("end")
     lines.append(f"{name}()")
@@ -113,6 +134,7 @@ def save_bundle(
     meta: dict,
     preview_png_data_url: str | None = None,
     base_dir: Path | None = None,
+    blend_m: float = MOVEP_BLEND_M,
 ) -> Path:
     """Write path.script + path.json (+ preview.png) into a timestamped folder."""
     base = Path(base_dir) if base_dir is not None else PATHS_DIR
@@ -133,11 +155,13 @@ def save_bundle(
         f"mode: {meta.get('mode', '?')}  surface: {meta.get('surface_name', '-')}\n"
         f"speed: {speed:.3f} m/s  offset: {meta.get('offset_mm', 0):.1f} mm  "
         f"safety: {meta.get('safety_mm', 0):.0f} mm  "
+        f"blend: {blend_m * 1000:.1f} mm  "
         f"strokes: {meta.get('stroke_count', len(final))}\n"
         f"Verify TCP + payload on the pendant; run at reduced speed first."
     )
     (folder / "path.script").write_text(
-        build_urscript(final, speed, safety_m, header=header), encoding="utf-8")
+        build_urscript(final, speed, safety_m, header=header, blend_m=blend_m),
+        encoding="utf-8")
     (folder / "path.json").write_text(
         json.dumps(build_json(final, meta), indent=2), encoding="utf-8")
 

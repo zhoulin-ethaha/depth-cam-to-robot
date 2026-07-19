@@ -263,23 +263,29 @@ port clash.) Closing the last browser window stops the server.
    outside the arm's estimated reach), **amber** safety/retract points off each
    stroke's start and end, and **grey** pen-up travel/approach moves. The
    toolpath sits at the current **Offset** above the white skeleton and updates
-   live as you edit Offset/Safety. **Spacing** (10–100 mm) sets the distance
-   between waypoints and re-generates the path when released. The
+   live as you edit Offset/Safety/Radius. **Spacing** (10–100 mm) sets the
+   distance between waypoints and re-generates the path when released.
+   **Radius** (0–5 mm, default 0.5) is the `movep` corner blend radius: how far
+   before each waypoint the robot starts curving into the next segment — the
+   preview's rounded corners re-render live as you drag it. It is clamped per
+   stroke to 45% of the stroke's shortest segment so the controller never
+   rejects the path. The
    **Path | Order** toggle switches to a numbered view (stroke order, green
    start / red end dots, size slider); **⧉ Pop out** opens the preview in its
    own window. Re-tune and regenerate freely, or **Retake** for a fresh capture.
 
 7. **Run** — set **Speed** (% of max TCP speed — governs the *entire* motion,
-   travels included), **Offset** (mm off the surface along the local normal) and
-   **Safety** (retract distance, mm) in the preview's execution bar, then Run. The
+   travels included), **Offset** (mm off the surface along the local normal),
+   **Safety** (retract distance, mm) and **Radius** (corner blend, mm) in the
+   preview's execution bar, then Run. The
    blue dot tracks the live TCP along the strokes. A progress bar tracks execution;
    **Cancel** stops mid-stroke; failures show "Run failed: …" in the header.
    Execution uses the same blended `movep` motion as the saved `path.script`,
    so a live run and a saved-file run trace the strokes identically.
 
    **💾 Save Path** (execution bar) writes the toolpath — with the current
-   Speed/Offset/Safety baked in — to a timestamped folder under `paths/` (see
-   *Saving toolpaths* below).
+   Speed/Offset/Safety/Radius baked in — to a timestamped folder under `paths/`
+   (see *Saving toolpaths* below).
 
 ### Participant Mode (automated pipeline)
 
@@ -312,8 +318,8 @@ Details worth knowing:
 
 - The automated run reuses the **same pipeline as the Developer-Mode buttons**,
   with the current Detection Parameters, crop, Spacing and Offset / Safety /
-  Speed exactly as Developer Mode shows them (config defaults on a fresh app
-  start). Set everything up — surface loaded, robot connected, parameters
+  Radius / Speed exactly as Developer Mode shows them (config defaults on a
+  fresh app start). Set everything up — surface loaded, robot connected, parameters
   tuned — then flip Auto ON; the Developer window shows each automated step live.
 - Auto ON with an empty trigger box can never fire — the popup shows
   "Enter a trigger distance (mm) to arm."
@@ -424,6 +430,70 @@ projector-side stream is only computed while the window is open.
 
 ---
 
+## Dual-camera stitching prototype (standalone)
+
+A **contained** prototype — not part of Developer or Participant Mode — that
+merges the feeds of **two** D435i cameras into one combined depth image
+covering a larger sand area, aiming for a **5–10 % frame overlap**.
+
+- Launch with **`run_stitch.bat`** → http://localhost:5006. **Close the main
+  app first** — each RealSense can only be owned by one process. With fewer
+  than two cameras connected, the tool runs on a **synthetic** sand scene
+  (banner shows why) so the UI and calibration workflow can still be tried.
+- The page shows four live views: **combined depth** (the overlap band is
+  outlined), **combined RGB**, and the detected **mask** and **skeleton**. The
+  RGB view has a dark strip in the middle — expected: the colour lens has a
+  narrower field of view than the depth sensor, and depth is the product here.
+- **How it merges:** each camera's depth image is converted to 3D points using
+  its own factory intrinsics, camera 2's points are moved into camera 1's
+  frame by a fixed rig transform, and both are projected onto one top-down
+  heightmap (uniform mm-per-pixel, no perspective seam). Where the frames
+  overlap, the two measurements are **averaged** — the seam region ends up
+  *less* noisy than either camera alone.
+- **Aligning the rig (once per mounting):**
+  1. Mount the cameras level, side by side; enter the rough baseline as
+     **tx** (mm). Adjust ty / tz / yaw until the two halves meet.
+  2. Rake a groove **across the seam**, then press **Auto-refine overlap** —
+     the tool measures the residual XY offset from the overlap band and
+     corrects tx/ty (flat sand has nothing to align on).
+  3. **Save calibration** → `stitch_calibration.json` (gitignored), reloaded
+     automatically next start. **Swap cameras** exchanges the two roles if
+     left/right come up reversed.
+- **Detection parameters** (same engine and meaning as Developer Mode) tune
+  the mask/skeleton computed on the stitched heightmap, live at ~4 Hz.
+- Like the main app, closing the last browser tab stops the program.
+
+---
+
+## Toolpath replay tool (standalone)
+
+A **contained** tool — not part of Developer or Participant Mode — that
+re-runs a previously saved toolpath without the camera or the full app.
+
+- Launch with **`run_replay.bat`** → http://localhost:5007. **Close the main
+  app first if it is connected to the robot** — one controller per robot. No
+  camera is needed.
+- The left panel lists every bundle in `paths/` (newest first). Click one to
+  load it: the saved **preview.png** is shown, along with strokes/waypoints
+  and the metadata it was saved with. Both files in a bundle work — clicking
+  the row loads **path.json**; the small `json` / `script` badges load either
+  file explicitly (the URScript is parsed back into waypoints, so a bundle
+  with only a `.script` still replays).
+- Enter the robot IP (prefilled from the last one used in the main app) and
+  **Connect**, set **Speed / Safety / Radius** (prefilled from the file's own
+  saved values), then **Run**. The saved waypoints are executed *literally* —
+  offset and contact depth were already baked in at save time — with the same
+  movel/movep actuation as the main app, so a replay traces exactly what
+  `path.script` would. **Cancel** stops mid-path; a progress bar tracks the run.
+- **Future robots:** everything brand-specific sits behind one small interface
+  (`replay_robot.ReplayBackend`). Porting to e.g. an ABB GoFa means writing one
+  backend class (compas_rrc: one MoveL per waypoint; `path.json` even carries a
+  ready-made plane per waypoint for ABB's quaternion frames) and switching
+  `REPLAY_BACKEND` in `config.py` — the loader, server and UI stay unchanged.
+- Like the main app, closing the last browser tab stops the program.
+
+---
+
 ## Configuration reference
 
 All parameters live in `config.py`.
@@ -484,7 +554,7 @@ All parameters live in `config.py`.
 | `TOOL_ORIENTATION` | `[0, π, 0]` | rad | Planar-mode TCP orientation (surface mode derives it per waypoint) |
 | `UR_REACH_M` | `1.30` | m | Reach-check envelope radius around the base |
 | `UR_MIN_REACH_M` | `0.18` | m | Reach-check inner cylinder around the base axis |
-| `MOVEP_BLEND_M` | `0.0005` | m | movep blend radius — shared by live execution and the URScript export |
+| `MOVEP_BLEND_M` | `0.0005` | m | Default movep blend radius (UI Radius slider 0–5 mm overrides per run) |
 
 ### Robot home position
 
@@ -514,6 +584,14 @@ depth_cam-to-robot/
 ├── robot_controller.py      # Thread-safe ur-rtde wrapper (moveL, movep paths, EE pose)
 ├── workspace.py             # Planar fallback mapping (Test Mode)
 ├── reach.py                 # Reach-envelope estimate (importable without hardware)
+├── stitcher.py              # Dual-camera prototype: heightmap stitching math
+├── dual_camera.py           # Dual-camera prototype: owns two RealSense pipelines
+├── stitch_server.py         # Dual-camera prototype: aiohttp server (port 5006)
+├── stitch_main.py           # Dual-camera prototype entry point (run_stitch.bat)
+├── toolpath_loader.py       # Replay tool: read saved bundles (path.json OR path.script)
+├── replay_robot.py          # Replay tool: robot-brand abstraction (UR now, ABB-ready)
+├── replay_server.py         # Replay tool: aiohttp server (port 5007)
+├── replay_main.py           # Replay tool entry point (run_replay.bat)
 ├── settings.py              # Persistent JSON settings (last robot IP)
 ├── CLAUDE.md                # AI-assistant repo guide (pipeline, API, gotchas)
 ├── .mcp.json                # Registers the MCP pipeline server (project scope)
@@ -532,6 +610,10 @@ depth_cam-to-robot/
     ├── projection.html      # Projector output / corner-pin calibration window
     ├── depth_view.html      # Participant Mode popup (depth numbers + Auto + trigger)
     ├── depth_overlay.js     # Popup logic: number overlay, Auto toggle, status chip
+    ├── stitch.html          # Dual-camera stitching prototype UI
+    ├── stitch.js            # Stitch UI logic (calibration + detection controls)
+    ├── replay.html          # Toolpath replay tool UI
+    ├── replay.js            # Replay UI logic (connect, pick bundle, run)
     ├── style.css            # Responsive layout
     └── lib/
         ├── three.min.js     # Three.js (3D rendering)
@@ -575,8 +657,9 @@ Euler) transforms projected waypoints and normals into the base frame. The plana
 Drawing strokes use blended `movep` process moves rather than streamed servoing:
 
 - Each stroke is one `movePath` of `movep` waypoints executed by the robot's own
-  controller at **constant tool speed**, with a small blend radius
-  (`MOVEP_BLEND_M`, 0.5 mm) rounding each waypoint transition.
+  controller at **constant tool speed**, with the exec-bar **Radius** blend
+  (default 0.5 mm, clamped per stroke to 45% of its shortest segment) rounding
+  each waypoint transition.
 - The saved `path.script` is built from the **same movep parameters**, so a live
   run from the browser and an offline run of the saved file trace the strokes
   identically — the whole point of the movep switch.

@@ -239,6 +239,10 @@
         <label for="exec-spacing" title="Distance between robot waypoints along each stroke — re-generates the path">Spacing</label>
         <input type="range" id="exec-spacing" min="10" max="100" step="1" value="10" />
         <span id="exec-spacing-val">10 mm</span>
+
+        <label for="exec-blend" title="movep corner blend radius — how far before each waypoint the robot starts curving into the next segment. Rounded corners show live in the Path Preview; clamped per stroke so the controller never rejects the path">Radius</label>
+        <input type="range" id="exec-blend" min="0" max="5" step="0.1" value="0.5" />
+        <span id="exec-blend-val">0.5 mm</span>
         <span class="legend-sep"></span>
         <label for="exec-speed">Speed</label>
         <input type="range" id="exec-speed" min="1" max="100" step="1" value="5" />

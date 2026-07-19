@@ -26,7 +26,7 @@ trigger run the whole pipeline automatically and lock the manual buttons.
   browser tab kills the server (deliberate, via SIGINT).
 - ALWAYS use `.venv\Scripts\python.exe`; never bare `pip` (broken launcher risk —
   use `python -m pip`). The venv is NOT relocatable.
-- Unit tests: `.venv/Scripts/python.exe -m pytest -q -m "not integration"` (177, no
+- Unit tests: `.venv/Scripts/python.exe -m pytest -q -m "not integration"` (218, no
   hardware). Integration: `-m integration`, needs RealSense/robot + TEST_ROBOT_IP.
 - No CLI modes. Hardware vs no-robot is in the UI: "Test Mode (no robot)" button
   unlocks capture with a synthetic workspace; Run stays gated on a robot connection.
@@ -66,8 +66,10 @@ trigger run the whole pipeline automatically and lock the manual buttons.
    cylinder). No IK/joint-limit/collision model. Red segments in preview.
 6. **Execution** `path_executor.PathExecutor` — per stroke: retract along tool axis
    (Safety mm) → movel travel → movel onto the first waypoint → **movep** blended
-   process path through the rest (MOVEP_BLEND_M=0.5 mm; async movePath, polled so
-   cancel stays responsive) — same actuation as the saved path.script; uniform
+   process path through the rest (blend = exec-bar Radius slider 0–5 mm, default
+   MOVEP_BLEND_M=0.5 mm, clamped per stroke by `path_export.stroke_blend` to
+   45% of the shortest segment; async movePath, polled so cancel stays
+   responsive) — same actuation as the saved path.script; uniform
    speed = UI % of MAX_TCP_SPEED (1.0 m/s); run-time normal offset baked into
    waypoints. `robot_controller` = thread-safe ur-rtde wrapper.
 7. **Export** `path_export.save_bundle` → `paths/<YYYY-MM-DD_HH-MM-SS>/` with
@@ -104,6 +106,41 @@ trigger run the whole pipeline automatically and lock the manual buttons.
     fanning out to all browser clients), so Developer windows watch it live.
     Statuses shown big top-right in the popup via `state.participant`.
 
+## Contained prototype: dual-camera stitching (NOT part of the two modes)
+`run_stitch.bat` → `stitch_main.py` → http://localhost:5006. Merges TWO D435i
+depth feeds (~5-10% frame overlap) into one top-down heightmap covering a
+larger sand area. Modules: `stitcher.py` (pure math: deproject with per-device
+intrinsics → cam2→cam1 rig transform `StitchCalib` (tx/ty/tz mm + yaw, swap) →
+rasterize onto a shared grid; overlap averaged, `refine_shift` = template-match
+XY trim from the overlap band), `dual_camera.py` (owns both RealSense pipelines
+by serial; <2 cameras → SYNTHETIC scene), `stitch_server.py` + `viewer/
+stitch.html`/`stitch.js` (4 MJPEG streams: stitched depth w/ overlap outline,
+RGB (middle gap expected — narrower colour FOV), mask, skeleton; WS: set_calib,
+set_params, auto_refine, save_calib → `stitch_calibration.json`, gitignored).
+Detection reuses `grooves_and_mask` unchanged on the stitched heightmap.
+Deliberately NOT wired into Developer/Participant Mode or the MCP tools; no
+main-app API change. Cannot run while the main app runs (one process per
+RealSense). Never import `main` or `camera_thread` from these modules.
+
+## Contained tool: toolpath replay (NOT part of the two modes)
+`run_replay.bat` → `replay_main.py` → http://localhost:5007. Connect the robot,
+pick a saved bundle under `paths/`, see its preview.png + meta, Run/Cancel with
+Speed/Safety/Radius prefilled from the file. Modules: `toolpath_loader.py`
+(pure parsing: `list_toolpaths`, `load_toolpath` → `Toolpath`; path.json read
+verbatim, path.script parsed back via the exporter's "# stroke N (M pts)"
+block layout — movep-run heuristic fallback for scripts without markers;
+meta reconstructed from v=/r=/approach distance), `replay_robot.py`
+(**`ReplayBackend` ABC = the robot-brand seam**: connect/disconnect/run/cancel
++ connected/running; `URReplayBackend` reuses RobotController + PathExecutor
+with draw_z=0/offset=0 — saved poses execute literally; a future ABB GoFa port
+= one new backend class + `make_backend` entry + `REPLAY_BACKEND` in config,
+recipe in the module docstring), `replay_server.py` (WS: connect, disconnect,
+refresh, select{name,source}, run{params}, cancel; GET /preview/{name}),
+`viewer/replay.html`/`replay.js`. Deliberately NOT wired into the two modes or
+MCP; no main-app API change. Reads settings.json `last_ip` (never writes it).
+Don't run while the main app holds the robot (one RTDE controller per robot);
+never import `main` from these modules.
+
 ## Conventions
 - Pose = `[x, y, z, rx, ry, rz]`: metres + UR rotation vector (rad), robot base
   frame. Tool approach = tool-frame +Z; outward surface normal = −(R@[0,0,1]).
@@ -117,8 +154,8 @@ trigger run the whole pipeline automatically and lock the manual buttons.
 ## Key WS messages (browser ↔ server; external tools may use these)
 - in: `connect{ip}`, `disconnect`, `simulate_workspace`, `capture_image`,
   `preview_adjust{params}`, `generate_path{params:{crop,adjustments,spacing_mm}}`,
-  `run{params:{speed_pct,offset_mm,safety_mm}}`, `cancel`,
-  `save_path{params:{speed_pct,offset_mm,safety_mm,image}}`,
+  `run{params:{speed_pct,offset_mm,safety_mm,blend_mm}}`, `cancel`,
+  `save_path{params:{speed_pct,offset_mm,safety_mm,blend_mm,image}}`,
   `set_groove_params{params}`, `set_reference`/`clear_reference`,
   `set_surface_pose{params:{pose,offset_mm}}`, `clear_surface`,
   `projection_hello`, `projection_corners{corners}`,
@@ -127,12 +164,13 @@ trigger run the whole pipeline automatically and lock the manual buttons.
   `set_trigger{params:{threshold_mm|null}}` (trigger distance; null/empty clears),
   `set_automation{params:{on}}` (Participant Auto toggle; ON locks manual
   capture/generate/run for every other client incl. MCP tools),
-  `set_exec_params{params:{speed_pct,offset_mm,safety_mm,spacing_mm}}` (live,
-  debounced sync of the exec bar so Participant Mode + reopened windows match).
+  `set_exec_params{params:{speed_pct,offset_mm,safety_mm,blend_mm,spacing_mm}}`
+  (live, debounced sync of the exec bar so Participant Mode + reopened windows
+  match; blend_mm = movep corner Radius slider, 0–5).
 - out: `state` (20 Hz, incl. `participant{auto,status,message,trigger_mm,below}`;
   `init` carries the same block plus `detect{crop,adjustments,spacing_mm}` +
-  `exec{speed_pct,offset_mm,safety_mm}` — the browser restores its controls
-  from these on (re)open), `capture_result{stroke_count,point_count,strokes,
+  `exec{speed_pct,offset_mm,safety_mm,blend_mm}` — the browser restores its
+  controls from these on (re)open), `capture_result{stroke_count,point_count,strokes,
   reach_flags,reach_out,skeleton,exec_viz:{blend_m,reach_m,min_reach_m,
   spacing_mm}}`, `still`, `preview`, `surface_status`, `save_result`,
   `reference_status`, `execution_update`, `connection_result`,
@@ -158,8 +196,12 @@ trigger run the whole pipeline automatically and lock the manual buttons.
   otherwise. Keep that wait ≥ the buffer length.
 - `movep` orientation interp assumes neighbouring waypoints don't flip the
   wrist — surface projection chains tool-X for minimal twist; keep that property.
-- Live drawing and the saved path.script both use movep with MOVEP_BLEND_M —
-  keep them in sync (that equivalence is the point of the movep executor).
-- MOVEP_BLEND_M must stay < half the minimum waypoint spacing (10 mm) or the
-  controller rejects the path.
-- Test count reference: 177 unit (+6 hardware-gated). Keep green.
+- Live drawing and the saved path.script both use movep with the exec-bar
+  Radius blend — keep them in sync (that equivalence is the point of the movep
+  executor). Both clamp via `path_export.stroke_blend` (45% of the stroke's
+  shortest segment) because the UR rejects any path where a blend reaches half
+  a segment; don't bypass that clamp. `MOVEP_BLEND_M` is only the default.
+- The browser preview reads the Radius slider directly (`readBlendMm()` →
+  `rebuildToolpathViz`); `exec_viz.blend_m` from capture_result is only the
+  session echo.
+- Test count reference: 218 unit (+6 hardware-gated). Keep green.

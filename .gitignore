@@ -19,3 +19,4 @@ htmlcov/
 # Claude Code PreCompact hook transcript backups
 .claude/transcript-backups/
 .claude/settings.local.json
+stitch_calibration.json

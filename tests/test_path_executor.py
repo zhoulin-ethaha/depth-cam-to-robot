@@ -88,6 +88,34 @@ class TestPathExecutorLifecycle:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Blend radius (the exec-bar Radius slider)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestBlendRadius:
+
+    def test_default_blend_forwarded(self, one_stroke):
+        ex, robot, state, strokes = one_stroke
+        ex.start(strokes)
+        _wait_done(ex)
+        blend = robot.move_process_path.call_args_list[0][0][3]
+        assert blend == pytest.approx(0.0005)       # MOVEP_BLEND_M
+
+    def test_custom_blend_clamped_per_stroke(self, one_stroke):
+        ex, robot, state, strokes = one_stroke
+        # _make_stroke segments are 10 mm: a 5 mm request clamps to 4.5 mm.
+        ex.start(strokes, blend_m=0.005)
+        _wait_done(ex)
+        blend = robot.move_process_path.call_args_list[0][0][3]
+        assert blend == pytest.approx(0.45 * 0.01)
+
+    def test_zero_blend_forwarded(self, one_stroke):
+        ex, robot, state, strokes = one_stroke
+        ex.start(strokes, blend_m=0.0)
+        _wait_done(ex)
+        assert robot.move_process_path.call_args_list[0][0][3] == 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Move sequence
 # ─────────────────────────────────────────────────────────────────────────────
 

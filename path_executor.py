@@ -6,6 +6,7 @@ from scipy.spatial.transform import Rotation
 from config import (
     DRAW_Z, TRAVEL_Z, DRAW_SPEED, TRAVEL_ACCEL, DRAW_ACCEL, MOVEP_BLEND_M,
 )
+from path_export import stroke_blend
 
 
 def _offset_pose(pose: list[float], dist: float) -> list[float]:
@@ -45,6 +46,7 @@ class PathExecutor:
         self._draw_z: float = DRAW_Z
         self._draw_speed: float = DRAW_SPEED
         self._travel_dist: float = TRAVEL_Z
+        self._blend_m: float = MOVEP_BLEND_M
 
     @property
     def running(self) -> bool:
@@ -52,7 +54,7 @@ class PathExecutor:
 
     def start(self, strokes: list[list[list[float]]], draw_z: float = DRAW_Z,
               draw_speed: float = DRAW_SPEED, normal_offset: float = 0.0,
-              travel_dist: float = TRAVEL_Z) -> None:
+              travel_dist: float = TRAVEL_Z, blend_m: float = MOVEP_BLEND_M) -> None:
         """
         draw_z        base-frame Z offset while drawing. Planar mode uses config
                       DRAW_Z; surface mode passes 0.0 (depth baked into waypoints).
@@ -60,12 +62,15 @@ class PathExecutor:
         normal_offset m added at run time along each waypoint's tool axis — lifts
                       the TCP off the surface without regenerating the path.
         travel_dist   m retracted along the tool axis before/between/after strokes.
+        blend_m       movep corner blend radius (the UI Radius slider); clamped
+                      per stroke so it never reaches half a segment length.
         """
         if self.running:
             return
         self._draw_z = draw_z
         self._draw_speed = max(draw_speed, 0.005)
         self._travel_dist = max(travel_dist, 0.005)
+        self._blend_m = max(blend_m, 0.0)
         if normal_offset:
             strokes = [[_offset_pose(p, normal_offset) for p in s] for s in strokes]
         self._cancel_event.clear()
@@ -167,8 +172,8 @@ class PathExecutor:
         """
         Draw one stroke as a blended ``movep`` process move — the same actuation
         the saved path.script produces. Mirrors the export sequence: moveL onto
-        the first waypoint, then movep through the rest at DRAW_SPEED with
-        MOVEP_BLEND_M corner blending. draw_z is baked into every waypoint's Z.
+        the first waypoint, then movep through the rest at DRAW_SPEED with the
+        run's corner blend radius. draw_z is baked into every waypoint's Z.
         """
         waypoints = [[p[0], p[1], p[2] + self._draw_z] + p[3:] for p in stroke]
         if not waypoints:
@@ -179,7 +184,8 @@ class PathExecutor:
 
         if len(waypoints) > 1:
             self._robot.move_process_path(
-                waypoints[1:], self._draw_speed, DRAW_ACCEL, MOVEP_BLEND_M,
+                waypoints[1:], self._draw_speed, DRAW_ACCEL,
+                stroke_blend(waypoints, self._blend_m),
                 self._cancel_event,
             )
 

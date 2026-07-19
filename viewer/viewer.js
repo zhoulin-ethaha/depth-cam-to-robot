@@ -236,6 +236,10 @@ function readExecOffsetM() {
 function readExecSafetyM() {
   return (parseFloat(document.getElementById("exec-safety").value) || 50) / 1000;
 }
+function readBlendMm() {
+  const v = parseFloat(document.getElementById("exec-blend").value);
+  return Number.isFinite(v) ? v : 0.5;   // 0 is a valid value — no || fallback
+}
 
 /* Entry point: store the capture payload and (re)build all preview layers. */
 function setPathData(strokes, skeleton, viz) {
@@ -308,7 +312,7 @@ function rebuildToolpathViz() {
 
   const off    = readExecOffsetM();
   const safety = readExecSafetyM();
-  const blend  = execViz.blend_m || 0.0005;
+  const blend  = readBlendMm() / 1000;   // the Radius slider drives the preview
 
   pathGroup = new THREE.Group();
   const okPts = [], badPts = [];           // colored draw segments
@@ -536,6 +540,11 @@ function restoreSessionSettings(data) {
   }
   if (Number.isFinite(e.offset_mm)) document.getElementById("exec-offset").value = e.offset_mm;
   if (Number.isFinite(e.safety_mm)) document.getElementById("exec-safety").value = e.safety_mm;
+  if (Number.isFinite(e.blend_mm)) {
+    document.getElementById("exec-blend").value = e.blend_mm;
+    document.getElementById("exec-blend-val").textContent =
+      document.getElementById("exec-blend").value + " mm";
+  }
 }
 
 function applyWorkspace(ws) {
@@ -1521,6 +1530,7 @@ document.getElementById("btn-run").addEventListener("click", () => {
     speed_pct: parseFloat(document.getElementById("exec-speed").value) || 5,
     offset_mm: parseFloat(document.getElementById("exec-offset").value) || 0,
     safety_mm: parseFloat(document.getElementById("exec-safety").value) || 50,
+    blend_mm: readBlendMm(),
   }});
   setButtonsForPhase("executing");
   setProgress(0);
@@ -1531,14 +1541,19 @@ document.getElementById("exec-speed").addEventListener("input", (e) => {
   document.getElementById("exec-speed-val").textContent = e.target.value + "%";
 });
 
-/* Offset / Safety change the run-time toolpath geometry (lift along the tool
-   axis + retract points), so the preview rebuilds client-side on every edit. */
+/* Offset / Safety / Radius change the run-time toolpath geometry (lift along
+   the tool axis, retract points, corner rounding), so the preview rebuilds
+   client-side on every edit. */
 let execVizTimer = null;
-["exec-offset", "exec-safety"].forEach((id) => {
+["exec-offset", "exec-safety", "exec-blend"].forEach((id) => {
   document.getElementById(id).addEventListener("input", () => {
     if (execVizTimer) clearTimeout(execVizTimer);
     execVizTimer = setTimeout(rebuildToolpathViz, 100);
   });
+});
+
+document.getElementById("exec-blend").addEventListener("input", (e) => {
+  document.getElementById("exec-blend-val").textContent = e.target.value + " mm";
 });
 
 /* Keep the server's session copy of the exec-bar values fresh so Participant
@@ -1551,10 +1566,11 @@ function syncExecParams() {
     speed_pct: parseFloat(document.getElementById("exec-speed").value) || 5,
     offset_mm: parseFloat(document.getElementById("exec-offset").value) || 0,
     safety_mm: parseFloat(document.getElementById("exec-safety").value) || 50,
+    blend_mm: readBlendMm(),
     spacing_mm: readSpacing(),
   }}), 300);
 }
-["exec-speed", "exec-offset", "exec-safety"].forEach((id) =>
+["exec-speed", "exec-offset", "exec-safety", "exec-blend"].forEach((id) =>
   document.getElementById(id).addEventListener("input", syncExecParams));
 spacingSlider.addEventListener("change", syncExecParams);
 
@@ -1568,6 +1584,7 @@ document.getElementById("btn-save-path").addEventListener("click", () => {
     speed_pct: parseFloat(document.getElementById("exec-speed").value) || 5,
     offset_mm: parseFloat(document.getElementById("exec-offset").value) || 0,
     safety_mm: parseFloat(document.getElementById("exec-safety").value) || 50,
+    blend_mm: readBlendMm(),
     image,
   }});
   setHeaderStatus("robot", true, "Saving toolpath…");

@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from path_export import build_urscript, build_json, save_bundle, _offset_pose
+from path_export import build_urscript, build_json, save_bundle, _offset_pose, stroke_blend
 
 _PI = math.pi
 
@@ -49,6 +49,45 @@ class TestUrscript:
         s = build_urscript([STROKES[0]], speed=0.3, safety=0.05)
         first = s.split("movel(")[1]
         assert "0.25000" in first   # 0.20 + 0.05 safety on Z
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Blend radius (the exec-bar Radius slider)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestBlendRadius:
+
+    def test_default_blend_in_script(self):
+        s = build_urscript(STROKES, speed=0.3, safety=0.05)
+        assert "r=0.0005" in s                      # MOVEP_BLEND_M default
+
+    def test_custom_blend_in_script(self):
+        s = build_urscript(STROKES, speed=0.3, safety=0.05, blend_m=0.003)
+        assert "r=0.0030" in s
+        assert "r=0.0005" not in s
+
+    def test_stroke_blend_passthrough_when_small(self):
+        # 50 mm segments: a 3 mm request is far below the 45% cap.
+        assert stroke_blend(STROKES[1], 0.003) == pytest.approx(0.003)
+
+    def test_stroke_blend_clamped_to_shortest_segment(self):
+        # 10 mm then 4 mm tail segment: 5 mm request must clamp to 0.45 × 4 mm.
+        stroke = [[0.4, 0.0, 0.2, 0.0, _PI, 0.0],
+                  [0.41, 0.0, 0.2, 0.0, _PI, 0.0],
+                  [0.414, 0.0, 0.2, 0.0, _PI, 0.0]]
+        assert stroke_blend(stroke, 0.005) == pytest.approx(0.45 * 0.004)
+
+    def test_stroke_blend_zero_and_degenerate(self):
+        assert stroke_blend(STROKES[0], 0.0) == 0.0
+        assert stroke_blend(STROKES[0], -1.0) == 0.0
+        assert stroke_blend([STROKES[0][0]], 0.005) == 0.005  # 1 pt: nothing to clamp
+
+    def test_clamped_blend_lands_in_script(self):
+        stroke = [[0.4, 0.0, 0.2, 0.0, _PI, 0.0],
+                  [0.41, 0.0, 0.2, 0.0, _PI, 0.0],
+                  [0.414, 0.0, 0.2, 0.0, _PI, 0.0]]
+        s = build_urscript([stroke], speed=0.3, safety=0.05, blend_m=0.005)
+        assert "r=0.0018" in s                      # 0.45 × 4 mm = 1.8 mm
 
 
 # ─────────────────────────────────────────────────────────────────────────────

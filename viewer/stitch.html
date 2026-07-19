@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dual-Camera Stitch (prototype)</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #101114; color: #d8d8d8;
+    font-family: "Segoe UI", system-ui, sans-serif; font-size: 14px;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 14px;
+    padding: 10px 16px; background: #17181c; border-bottom: 1px solid #2a2b30;
+  }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  header .tag {
+    font-size: 11px; color: #ffb020; border: 1px solid #ffb02066;
+    border-radius: 4px; padding: 1px 6px;
+  }
+  #info { font-size: 12px; color: #8a8f98; margin-left: auto; }
+  #note { font-size: 12px; color: #ffb020; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #views {
+    flex: 1; display: grid; gap: 8px; padding: 10px;
+    grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; min-width: 0;
+  }
+  .vp {
+    position: relative; background: #000; border: 1px solid #2a2b30;
+    border-radius: 6px; overflow: hidden; display: flex;
+    align-items: center; justify-content: center;
+  }
+  .vp img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .vp .lbl {
+    position: absolute; top: 6px; left: 8px; font-size: 12px; color: #cfd3da;
+    background: #000a; padding: 1px 7px; border-radius: 4px; pointer-events: none;
+  }
+  aside {
+    width: 300px; flex: none; overflow-y: auto; padding: 10px 12px;
+    background: #15161a; border-left: 1px solid #2a2b30;
+  }
+  fieldset {
+    border: 1px solid #2a2b30; border-radius: 6px;
+    margin: 0 0 12px; padding: 8px 10px 10px;
+  }
+  legend { font-size: 12px; color: #9aa0aa; padding: 0 4px; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .row label { flex: 1; font-size: 12.5px; color: #b8bcc4; }
+  .row output { width: 44px; text-align: right; font-size: 12px; color: #8a8f98; }
+  input[type=number] {
+    width: 76px; background: #0d0e11; color: #d8d8d8;
+    border: 1px solid #33353b; border-radius: 4px; padding: 3px 6px;
+  }
+  input[type=range] { flex: 1.4; accent-color: #4a9eff; }
+  select {
+    background: #0d0e11; color: #d8d8d8; border: 1px solid #33353b;
+    border-radius: 4px; padding: 3px 6px;
+  }
+  button {
+    background: #23262c; color: #d8d8d8; border: 1px solid #3a3d44;
+    border-radius: 5px; padding: 5px 10px; cursor: pointer; font-size: 13px;
+  }
+  button:hover { background: #2c3038; }
+  #btn-save { border-color: #2f6f4f; }
+  #msg { font-size: 12px; min-height: 30px; color: #7ec8a8; white-space: pre-wrap; }
+  #msg.err { color: #ff7a6e; }
+  .hint { font-size: 11px; color: #6d727c; margin: 4px 0 0; line-height: 1.4; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Dual-Camera Stitch</h1><span class="tag">PROTOTYPE</span>
+    <span id="note"></span>
+    <span id="info">connecting…</span>
+  </header>
+  <main>
+    <div id="views">
+      <!-- src set by stitch.js AFTER the WebSocket is open: the four MJPEG
+           streams hold their connections forever and would otherwise starve
+           the WS handshake out of Chrome's per-host connection pool. -->
+      <div class="vp"><img data-src="/stitch/depth" alt=""><span class="lbl">Combined depth (overlap outlined)</span></div>
+      <div class="vp"><img data-src="/stitch/rgb" alt=""><span class="lbl">Combined RGB (gap expected)</span></div>
+      <div class="vp"><img data-src="/stitch/mask" alt=""><span class="lbl">Mask</span></div>
+      <div class="vp"><img data-src="/stitch/skel" alt=""><span class="lbl">Skeleton</span></div>
+    </div>
+    <aside>
+      <fieldset>
+        <legend>Alignment (camera 2 → camera 1)</legend>
+        <div class="row"><label>tx (mm)</label><input type="number" id="cal-tx" step="1"></div>
+        <div class="row"><label>ty (mm)</label><input type="number" id="cal-ty" step="1"></div>
+        <div class="row"><label>tz (mm)</label><input type="number" id="cal-tz" step="1"></div>
+        <div class="row"><label>yaw (°)</label><input type="number" id="cal-yaw" step="0.1"></div>
+        <div class="row"><label>Swap cameras</label><input type="checkbox" id="cal-swap"></div>
+        <div class="row">
+          <button id="btn-refine" title="Estimate the residual XY offset from the overlap band — needs a groove or object crossing the seam">Auto-refine overlap</button>
+          <button id="btn-save">Save calibration</button>
+        </div>
+        <p class="hint">Set tx roughly to the camera baseline, then rake a groove
+        across the seam and press Auto-refine. Save writes
+        stitch_calibration.json (reloaded on next start).</p>
+      </fieldset>
+      <fieldset>
+        <legend>Detection parameters</legend>
+        <div class="row"><label>Detect</label>
+          <select id="p-detect">
+            <option value="valley">valley</option>
+            <option value="ridge">ridge</option>
+            <option value="band">band</option>
+          </select>
+        </div>
+        <div class="row"><label>Smooth σ</label><input type="range" id="p-smooth" min="0" max="5" step="0.1"><output for="p-smooth"></output></div>
+        <div class="row"><label>Detrend σ</label><input type="range" id="p-detrend" min="5" max="80" step="1"><output for="p-detrend"></output></div>
+        <div class="row"><label>Depth (mm)</label><input type="range" id="p-depth" min="0.2" max="10" step="0.1"><output for="p-depth"></output></div>
+        <div class="row"><label>Min blob (px)</label><input type="range" id="p-blob" min="0" max="500" step="10"><output for="p-blob"></output></div>
+        <div class="row"><label>Min mean depth (mm)</label><input type="range" id="p-meand" min="0" max="5" step="0.1"><output for="p-meand"></output></div>
+        <div class="row"><label>Min width (mm)</label><input type="range" id="p-minw" min="0" max="50" step="1"><output for="p-minw"></output></div>
+        <div class="row"><label>Max width (mm, 0=off)</label><input type="range" id="p-maxw" min="0" max="150" step="5"><output for="p-maxw"></output></div>
+        <div class="row"><label>Min length (mm)</label><input type="range" id="p-minl" min="0" max="300" step="5"><output for="p-minl"></output></div>
+      </fieldset>
+      <div id="msg"></div>
+    </aside>
+  </main>
+  <script src="/static/stitch.js"></script>
+</body>
+</html>

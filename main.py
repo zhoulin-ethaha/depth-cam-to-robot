@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import os
 import signal
 import sys
@@ -549,6 +550,8 @@ async def on_generate_path(ws, params: dict) -> None:
         shared_state["strokes"] = robot_strokes
         shared_state["strokes_surface"] = surface_mode
         shared_state["phase"]   = "captured" if robot_strokes else "editing"
+        session_blend_mm = (shared_state.get("participant_exec_params") or {}).get(
+            "blend_mm", MOVEP_BLEND_M * 1000.0)
 
     await server.send_capture_result(
         ws,
@@ -562,7 +565,7 @@ async def on_generate_path(ws, params: dict) -> None:
         # Everything the browser needs to rebuild the toolpath preview
         # client-side when the exec-bar Offset/Safety inputs change.
         exec_viz={
-            "blend_m": MOVEP_BLEND_M,
+            "blend_m": session_blend_mm / 1000.0,
             "reach_m": UR_REACH_M,
             "min_reach_m": UR_MIN_REACH_M,
             "spacing_mm": spacing_mm,
@@ -615,11 +618,13 @@ async def on_run(ws, params: dict | None = None) -> None:
     speed_pct = _num("speed_pct", (DRAW_SPEED / MAX_TCP_SPEED) * 100.0, 1.0, 100.0)
     offset_mm = _num("offset_mm", 0.0, -20.0, 200.0)
     safety_mm = _num("safety_mm", TRAVEL_Z * 1000.0, 5.0, 300.0)
+    blend_mm  = _num("blend_mm", MOVEP_BLEND_M * 1000.0, 0.0, 5.0)
     draw_speed = (speed_pct / 100.0) * MAX_TCP_SPEED
 
     with state_lock:
         shared_state["participant_exec_params"] = {
-            "speed_pct": speed_pct, "offset_mm": offset_mm, "safety_mm": safety_mm}
+            "speed_pct": speed_pct, "offset_mm": offset_mm,
+            "safety_mm": safety_mm, "blend_mm": blend_mm}
 
     # Surface strokes already carry contact depth along the surface normal, so
     # the executor must not add the planar DRAW_Z on top.
@@ -629,10 +634,12 @@ async def on_run(ws, params: dict | None = None) -> None:
         draw_speed=draw_speed,
         normal_offset=offset_mm / 1000.0,
         travel_dist=safety_mm / 1000.0,
+        blend_m=blend_mm / 1000.0,
     )
     print(f"[executor] starting path: {len(strokes)} strokes, "
           f"{speed_pct:.0f}% speed ({draw_speed:.3f} m/s), "
-          f"offset {offset_mm:.1f} mm, safety {safety_mm:.0f} mm"
+          f"offset {offset_mm:.1f} mm, safety {safety_mm:.0f} mm, "
+          f"blend {blend_mm:.1f} mm"
           + (" (surface mode)" if surface_mode else ""))
 
 
@@ -666,11 +673,13 @@ async def on_save_path(ws, params: dict) -> None:
     speed_pct = _num("speed_pct", (DRAW_SPEED / MAX_TCP_SPEED) * 100.0, 1.0, 100.0)
     offset_mm = _num("offset_mm", 0.0, -20.0, 200.0)
     safety_mm = _num("safety_mm", TRAVEL_Z * 1000.0, 5.0, 300.0)
+    blend_mm  = _num("blend_mm", MOVEP_BLEND_M * 1000.0, 0.0, 5.0)
     speed = (speed_pct / 100.0) * MAX_TCP_SPEED
 
     with state_lock:
         shared_state["participant_exec_params"] = {
-            "speed_pct": speed_pct, "offset_mm": offset_mm, "safety_mm": safety_mm}
+            "speed_pct": speed_pct, "offset_mm": offset_mm,
+            "safety_mm": safety_mm, "blend_mm": blend_mm}
 
     meta = {
         "saved": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -682,6 +691,7 @@ async def on_save_path(ws, params: dict) -> None:
         "speed_pct": round(speed_pct, 1),
         "offset_mm": round(offset_mm, 2),
         "safety_mm": round(safety_mm, 1),
+        "blend_mm": round(blend_mm, 2),
         "stroke_count": len(strokes),
         "point_count": sum(len(s) for s in strokes),
     }
@@ -689,8 +699,11 @@ async def on_save_path(ws, params: dict) -> None:
     loop = asyncio.get_running_loop()
     try:
         folder = await loop.run_in_executor(
-            None, save_bundle, strokes, speed, safety_mm / 1000.0, offset_mm / 1000.0,
-            meta, params.get("image"),
+            None,
+            functools.partial(
+                save_bundle, strokes, speed, safety_mm / 1000.0, offset_mm / 1000.0,
+                meta, params.get("image"), blend_m=blend_mm / 1000.0,
+            ),
         )
     except Exception as exc:
         await server.send_save_result(ws, False, error=str(exc))
@@ -769,11 +782,13 @@ async def on_set_exec_params(params: dict) -> None:
     speed_pct = _num("speed_pct", (DRAW_SPEED / MAX_TCP_SPEED) * 100.0, 1.0, 100.0)
     offset_mm = _num("offset_mm", 0.0, -20.0, 200.0)
     safety_mm = _num("safety_mm", TRAVEL_Z * 1000.0, 5.0, 300.0)
+    blend_mm  = _num("blend_mm", MOVEP_BLEND_M * 1000.0, 0.0, 5.0)
     spacing_mm = _num("spacing_mm", RESAMPLE_SPACING_MM,
                       RESAMPLE_SPACING_MIN_MM, RESAMPLE_SPACING_MAX_MM)
     with state_lock:
         shared_state["participant_exec_params"] = {
-            "speed_pct": speed_pct, "offset_mm": offset_mm, "safety_mm": safety_mm}
+            "speed_pct": speed_pct, "offset_mm": offset_mm,
+            "safety_mm": safety_mm, "blend_mm": blend_mm}
         shared_state["participant_gen_params"]["spacing_mm"] = spacing_mm
 
 
