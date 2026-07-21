@@ -19,11 +19,15 @@ import re
 
 # (regex, reason) -- matched case-insensitively against the raw command.
 _RULES = [
-    # Force pushes -- can overwrite already-published history.
+    # Force pushes -- can overwrite already-published history. `--force-with-lease`
+    # is deliberately ALLOWED (it refuses to clobber remote commits you haven't
+    # fetched, and is what the /pushgit command uses); only the unguarded
+    # `--force` / `-f` forms are blocked.
     (re.compile(
         r"git\s+push\b[^|;&\n]*?"
-        r"(--force\b|--force-with-lease\b|(?<![\w-])-f(?![\w-]))", re.I),
-     "force push -- can overwrite already-pushed history (dangerous on main/master)"),
+        r"(--force\b(?!-with-lease)|(?<![\w-])-f(?![\w-]))", re.I),
+     "force push (--force/-f) -- can overwrite already-pushed history; "
+     "use --force-with-lease instead (dangerous on main/master)"),
 
     # Unix recursive remove: rm -rf, rm -r, rm -fr, rm --recursive
     # (also catches PowerShell's `rm -Recurse` alias).
