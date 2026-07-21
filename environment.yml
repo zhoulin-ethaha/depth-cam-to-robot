@@ -3,7 +3,7 @@
 # (Python packages only. The Intel RealSense USB driver is an OS-level
 #  install and lives OUTSIDE this environment — install it separately:
 #  https://github.com/IntelRealSense/librealsense/releases)
-name: sybil
+name: sandskript
 channels:
   - defaults
 dependencies:

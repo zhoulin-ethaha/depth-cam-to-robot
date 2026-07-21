@@ -1,7 +1,7 @@
 """
 Entry point for the Dual-Cam Vision prototype (dual-camera stitching).
 
-Run with run_stitch.bat (or the sybil conda env's python stitch_main.py) →
+Run with run_stitch.bat (or the sandskript conda env's python stitch_main.py) →
 http://localhost:5006. CONTAINED from the main app: do not run both at once —
 each RealSense can only be owned by one process. With fewer than two cameras
 attached the tool runs on a synthetic scene so the UI and calibration workflow

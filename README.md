@@ -198,8 +198,8 @@ D435i is the reference setup here.
 ```bash
 git clone https://github.com/zhoulin-ethaha/depth-cam-to-robot.git
 cd depth-cam-to-robot
-conda env create -f environment.yml   # creates the "sybil" env (Python 3.11 + all deps)
-conda activate sybil
+conda env create -f environment.yml   # creates the "sandskript" env (Python 3.11 + all deps)
+conda activate sandskript
 ```
 
 Requires [Miniconda](https://docs.conda.io/en/latest/miniconda.html) (or Anaconda).
@@ -208,7 +208,7 @@ environment — install it separately from the
 [librealsense releases](https://github.com/IntelRealSense/librealsense/releases).
 
 The `run*.bat` launchers, `.mcp.json`, and the `.claude/` hooks hardcode the env's
-Python path (`C:\Users\linfo\miniconda3\envs\sybil\python.exe`); on a new machine,
+Python path (`C:\Users\linfo\miniconda3\envs\sandskript\python.exe`); on a new machine,
 recreate the env and update those paths to match your conda install (see the
 `CONDA_PY` line at the top of each .bat file).
 

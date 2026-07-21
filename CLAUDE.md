@@ -24,9 +24,9 @@ trigger run the whole pipeline automatically and lock the manual buttons.
 - Run: `run.bat` or the conda-env python (`ENVPY` below) `main.py` → Developer
   Mode at http://localhost:5005 (Participant Mode = its ⧉ popup). Closing the
   last browser tab kills the server (deliberate, via SIGINT).
-- Python env = the **`sybil` conda env** (recipe: `environment.yml`;
+- Python env = the **`sandskript` conda env** (recipe: `environment.yml`;
   recreate with `conda env create -f environment.yml`). On this machine
-  ENVPY = `C:\Users\linfo\miniconda3\envs\sybil\python.exe` — the .bat
+  ENVPY = `C:\Users\linfo\miniconda3\envs\sandskript\python.exe` — the .bat
   files and `.mcp.json` hardcode it; update those paths on a new machine.
   Never bare `pip` (broken launcher risk — use `<ENVPY> -m pip`). The Intel
   RealSense USB driver is an OS-level install, outside the env. The old
@@ -176,7 +176,7 @@ never import `main` from these modules.
   [0,1]; stroke coords always shifted back to full frame before mapping.
 - Mesh files + UI depth params in mm; everything robot-side in m.
 - `config.py` = every constant. `settings.json` = last robot IP + projector
-  corners. `environment.yml` = the committed conda-env recipe (env = `sybil`).
+  corners. `environment.yml` = the committed conda-env recipe (env = `sandskript`).
   Gitignored: `surfaces/`, `paths/`, `presets/`, `settings.json`, `.venv/`
   (retired but still ignored as a safety net).
 - Phases: idle → previewing → editing → captured → executing → done | error.
