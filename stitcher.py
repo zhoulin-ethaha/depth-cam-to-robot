@@ -1,5 +1,5 @@
 """
-Pure math for the dual-camera stitching prototype (no hardware, no server).
+Pure math for the Dual-Cam Vision prototype (no hardware, no server).
 
 Two D435i cameras look down at the sand side by side with a small (~5-10%)
 overlap. Each camera's metric depth image is deprojected to 3D points with its
@@ -73,6 +73,8 @@ class StitchCalib:
     tz_mm: float = 0.0      # mounting-height difference along the view axis
     yaw_deg: float = 0.0    # rotation about the viewing axis
     swap: bool = False      # swap which physical camera plays cam1/cam2
+    rot1: bool = False      # physical camera 1 mounted upside-down (feed rotated 180°)
+    rot2: bool = False      # physical camera 2 mounted upside-down
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "StitchCalib":
@@ -82,11 +84,14 @@ class StitchCalib:
             if k in d and d[k] is not None:
                 setattr(c, k, float(d[k]))
         c.swap = bool(d.get("swap", False))
+        c.rot1 = bool(d.get("rot1", False))
+        c.rot2 = bool(d.get("rot2", False))
         return c
 
     def to_dict(self) -> dict:
         return {"tx_mm": self.tx_mm, "ty_mm": self.ty_mm, "tz_mm": self.tz_mm,
-                "yaw_deg": self.yaw_deg, "swap": self.swap}
+                "yaw_deg": self.yaw_deg, "swap": self.swap,
+                "rot1": self.rot1, "rot2": self.rot2}
 
 
 @dataclass
@@ -115,6 +120,35 @@ class StitchResult:
 
 
 # ── geometry ──────────────────────────────────────────────────────────────────
+
+def rotate180(frame: CameraFrame) -> CameraFrame:
+    """
+    A camera mounted upside-down delivers the scene rotated 180° about its
+    optical axis. Flipping the image both ways and mirroring the principal
+    point makes the frame equivalent to a right-side-up camera, so the rest of
+    the pipeline (and the operator looking at the feed) can forget about it.
+    """
+    intr = frame.intr
+    return CameraFrame(
+        depth_m=frame.depth_m[::-1, ::-1].copy(),
+        valid=frame.valid[::-1, ::-1].copy(),
+        intr=Intrinsics(fx=intr.fx, fy=intr.fy,
+                        cx=(intr.width - 1) - intr.cx,
+                        cy=(intr.height - 1) - intr.cy,
+                        width=intr.width, height=intr.height),
+        rgb=None if frame.rgb is None else frame.rgb[::-1, ::-1].copy(),
+    )
+
+
+def apply_orientation(f1: CameraFrame, f2: CameraFrame, calib: StitchCalib
+                      ) -> tuple[CameraFrame, CameraFrame]:
+    """Physical frames (serial order) → logical (cam1=left, cam2=right)."""
+    if calib.rot1:
+        f1 = rotate180(f1)
+    if calib.rot2:
+        f2 = rotate180(f2)
+    return (f2, f1) if calib.swap else (f1, f2)
+
 
 def deproject(depth_m: np.ndarray, valid: np.ndarray, intr: Intrinsics
               ) -> tuple[np.ndarray, np.ndarray]:
@@ -196,9 +230,10 @@ def stitch(f1: CameraFrame, f2: CameraFrame, calib: StitchCalib,
            mm_per_px: float = STITCH_MM_PER_PX) -> StitchResult:
     """
     Merge two camera frames into one top-down heightmap in cam1's frame.
+    f1/f2 are the PHYSICAL frames (serial order); calib's rot/swap flags are
+    applied here.
     """
-    if calib.swap:
-        f1, f2 = f2, f1
+    f1, f2 = apply_orientation(f1, f2, calib)
 
     p1, idx1 = deproject(f1.depth_m, f1.valid, f1.intr)
     p2, idx2 = deproject(f2.depth_m, f2.valid, f2.intr)
@@ -285,17 +320,13 @@ def stitch(f1: CameraFrame, f2: CameraFrame, calib: StitchCalib,
                         (xmin, ymin), h1=h1, v1=v1, h2=h2, v2=v2)
 
 
-# ── overlap auto-refine ───────────────────────────────────────────────────────
+# ── overlap auto-refine / auto-align ──────────────────────────────────────────
 
-def refine_shift(result: StitchResult, min_overlap_px: int = 400
-                 ) -> Optional[tuple[float, float]]:
+def _overlap_patches(result: StitchResult, min_overlap_px: int
+                     ) -> Optional[tuple[np.ndarray, np.ndarray]]:
     """
-    Estimate the residual XY misalignment between the two cameras from the
-    overlap band of an existing stitch, by phase-correlating the two detrended
-    height patches. Returns (dtx_mm, dty_mm) to ADD to the calibration's
-    tx_mm/ty_mm, or None if the overlap is too small / correlation too weak.
-    Needs some relief (grooves, objects) in the overlap — flat sand has nothing
-    to correlate.
+    Detrended, unit-std height patches of the two cameras over the overlap
+    band's bounding box, or None if the overlap is too small.
     """
     both = result.v1 & result.v2
     if int(both.sum()) < min_overlap_px:
@@ -313,7 +344,37 @@ def refine_shift(result: StitchResult, min_overlap_px: int = 400
         std = p.std()
         return (p / std if std > 1e-9 else p).astype(np.float32)
 
-    pa, pb = patch(result.h1, result.v1), patch(result.h2, result.v2)
+    return patch(result.h1, result.v1), patch(result.h2, result.v2)
+
+
+def overlap_score(result: StitchResult, min_overlap_px: int = 300
+                  ) -> Optional[float]:
+    """
+    How well the two cameras' height relief agrees inside the overlap band
+    (~normalized correlation, 1 = identical). None if the overlap is too small.
+    Flat sand scores ≈ 0 — there is nothing to agree on.
+    """
+    patches = _overlap_patches(result, min_overlap_px)
+    if patches is None:
+        return None
+    pa, pb = patches
+    return float((pa * pb).mean())
+
+
+def refine_shift(result: StitchResult, min_overlap_px: int = 400
+                 ) -> Optional[tuple[float, float]]:
+    """
+    Estimate the residual XY misalignment between the two cameras from the
+    overlap band of an existing stitch, by phase-correlating the two detrended
+    height patches. Returns (dtx_mm, dty_mm) to ADD to the calibration's
+    tx_mm/ty_mm, or None if the overlap is too small / correlation too weak.
+    Needs some relief (grooves, objects) in the overlap — flat sand has nothing
+    to correlate.
+    """
+    patches = _overlap_patches(result, min_overlap_px)
+    if patches is None:
+        return None
+    pa, pb = patches
     ph, pw = pa.shape
     if ph < 32 or pw < 32:
         return None
@@ -332,6 +393,46 @@ def refine_shift(result: StitchResult, min_overlap_px: int = 400
     # (m - loc) grid px, and the correction is the negative of that shift.
     return (float(loc[0] - mx) * result.mm_per_px,
             float(loc[1] - my) * result.mm_per_px)
+
+
+def auto_align(f1: CameraFrame, f2: CameraFrame, calib: StitchCalib,
+               mm_per_px: float = STITCH_MM_PER_PX, coarse_mm: float = 6.0,
+               min_score: float = 0.25) -> Optional[StitchCalib]:
+    """
+    Find the side-by-side baseline automatically: sweep candidate tx values
+    over plausible spacings (55–100 % of one camera footprint, i.e. up to
+    ~45 % overlap), score each coarse stitch by how well the two cameras'
+    relief agrees in the resulting overlap band, then fine-trim the winner
+    with refine_shift. Returns a new calibration (tx/ty replaced; rot, swap,
+    tz and yaw kept from `calib`) or None when no candidate scores — which is
+    what flat, featureless sand produces; there must be a groove or object
+    crossing the seam.
+    """
+    # RGB rides along in stitch(); strip it — 20 coarse stitches only need depth.
+    a = CameraFrame(f1.depth_m, f1.valid, f1.intr, None)
+    b = CameraFrame(f2.depth_m, f2.valid, f2.intr, None)
+    ref = apply_orientation(a, b, calib)[0]        # the frame acting as cam1
+    z = ref.depth_m[ref.valid]
+    if z.size == 0:
+        return None
+    foot_mm = float(np.median(z)) * 1000.0 * ref.intr.width / ref.intr.fx
+    best_tx, best_score = None, -1.0
+    for frac in np.arange(0.55, 1.0, 0.025):
+        cand = StitchCalib(**{**calib.to_dict(),
+                              "tx_mm": frac * foot_mm, "ty_mm": 0.0})
+        score = overlap_score(stitch(a, b, cand, coarse_mm))
+        if score is not None and score > best_score:
+            best_tx, best_score = cand.tx_mm, score
+    if best_tx is None or best_score < min_score:
+        return None
+    out = StitchCalib(**{**calib.to_dict(), "tx_mm": best_tx, "ty_mm": 0.0})
+    # Sweep steps (~2.5 % of a footprint) land well inside refine_shift's
+    # search margin, so the trim converges in one pass.
+    delta = refine_shift(stitch(a, b, out, mm_per_px))
+    if delta is not None:
+        out.tx_mm += delta[0]
+        out.ty_mm += delta[1]
+    return out
 
 
 # ── synthetic scene (no-hardware fallback + tests) ────────────────────────────

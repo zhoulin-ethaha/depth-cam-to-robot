@@ -1,11 +1,12 @@
 """
-aiohttp server for the dual-camera stitching prototype (port 5006).
+aiohttp server for the Dual-Cam Vision prototype (port 5006).
 
-Serves the stitch UI (viewer/stitch.html), four MJPEG streams (stitched depth /
-RGB / mask / skeleton) and a small JSON WebSocket for the calibration and
-detection-parameter controls. Completely separate from server.py — this tool
-must stay contained from Developer/Participant Mode. Like the main app, the
-process exits (SIGINT) when the last browser tab closes.
+Serves the UI (viewer/stitch.html), the MJPEG streams (stitched depth / RGB /
+mask / skeleton, plus the per-camera left/right setup views) and a small JSON
+WebSocket for the stitch toggle, calibration and detection-parameter controls.
+Completely separate from server.py — this tool must stay contained from
+Developer/Participant Mode. Like the main app, the process exits (SIGINT) when
+the last browser tab closes.
 """
 
 from __future__ import annotations
@@ -54,6 +55,11 @@ class StitchServer:
         app.router.add_get("/stitch/rgb", lambda r: self._mjpeg(r, "stitch_rgb_jpg"))
         app.router.add_get("/stitch/mask", lambda r: self._mjpeg(r, "stitch_mask_jpg"))
         app.router.add_get("/stitch/skel", lambda r: self._mjpeg(r, "stitch_skel_jpg"))
+        # Per-camera setup views (stitch OFF), already oriented left/right.
+        app.router.add_get("/cam/left/depth", lambda r: self._mjpeg(r, "stitch_left_depth_jpg"))
+        app.router.add_get("/cam/left/rgb", lambda r: self._mjpeg(r, "stitch_left_rgb_jpg"))
+        app.router.add_get("/cam/right/depth", lambda r: self._mjpeg(r, "stitch_right_depth_jpg"))
+        app.router.add_get("/cam/right/rgb", lambda r: self._mjpeg(r, "stitch_right_rgb_jpg"))
         app.router.add_get("/ws", self._handle_ws)
         app.router.add_static("/static", _VIEWER_DIR, show_index=False)
         return app
@@ -95,6 +101,7 @@ class StitchServer:
             "type": "init",
             "calib": self._camera.get_calib().to_dict(),
             "params": _params_dict(self._params),
+            "stitch_on": self._camera.get_stitch(),
         }))
         try:
             async for msg in ws:
@@ -116,6 +123,16 @@ class StitchServer:
         elif mtype == "set_calib":
             merged = {**self._camera.get_calib().to_dict(), **params}
             self._camera.set_calib(StitchCalib.from_dict(merged))
+        elif mtype == "set_stitch":
+            was = self._camera.get_stitch()
+            on = bool(params.get("on"))
+            self._camera.set_stitch(on)
+            if on and not was:
+                # Turning the stitch on attempts the overlap search right away;
+                # on failure the current calibration simply stays.
+                self._camera.request_align()
+        elif mtype == "auto_align":
+            self._camera.request_align()
         elif mtype == "auto_refine":
             self._camera.request_refine()
         elif mtype == "save_calib":
@@ -135,7 +152,9 @@ class StitchServer:
                 note = self._state.get("stitch_note")
                 calib = self._state.get("stitch_calib")
                 refine = self._state.get("stitch_refine_result")
-            payload = {"type": "state", "info": info, "note": note, "calib": calib}
+                stitch_on = self._state.get("stitch_on", self._camera.get_stitch())
+            payload = {"type": "state", "info": info, "note": note,
+                       "calib": calib, "stitch_on": stitch_on}
             if refine is not None and refine is not last_refine:
                 payload["refine"] = refine
                 last_refine = refine

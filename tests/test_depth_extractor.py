@@ -254,11 +254,41 @@ class TestNaturalGrooveRejection:
         p = DepthGrooveParams.from_dict({
             "ref_strength": 2.0, "min_length_mm": -5,
             "min_width_mm": 100, "min_mean_depth_mm": 3,
+            "ignore_closer_mm": -10,
         })
         assert p.ref_strength <= 1.0
         assert p.min_length_mm >= 0
         assert p.min_width_mm <= 50
         assert p.min_mean_depth_mm == 3.0
+        assert p.ignore_closer_mm == 0.0
+        assert DepthGrooveParams.from_dict(
+            {"ignore_closer_mm": 280}).ignore_closer_mm == 280.0
+
+    def test_ignore_closer_drops_blobs_touching_near_object(self):
+        # Sand at 0.30 m with two grooves; a hand-like object hovers at 0.25 m
+        # over the left groove. The phantom relief the object creates — and the
+        # groove it touches — must vanish; the far groove must survive.
+        d = np.full((480, 640), 0.30, dtype=np.float32)
+        cv2.line(d, (60, 100), (300, 100), 0.303, 4)     # groove under the hand
+        cv2.line(d, (100, 350), (500, 350), 0.303, 4)    # groove far from it
+        cv2.rectangle(d, (140, 60), (220, 130), 0.25, -1)  # object 50 mm closer
+
+        p_off = DepthGrooveParams()
+        base = grooves_from_depth(d, params=p_off)
+        assert _has_row(base, 100) and _has_row(base, 350)
+
+        p_on = DepthGrooveParams(ignore_closer_mm=280.0)   # sand 300 > 280 > hand 250
+        filt = grooves_from_depth(d, params=p_on)
+        assert not _has_row(filt, 100)                    # touched groove removed
+        assert _has_row(filt, 350)                        # distant groove kept
+
+    def test_ignore_closer_ignores_scene_beyond_cutoff(self):
+        # Cutoff nearer than everything in frame → no effect at all.
+        d = np.full((480, 640), 0.30, dtype=np.float32)
+        cv2.line(d, (100, 240), (500, 240), 0.303, 4)
+        a = grooves_from_depth(d, params=DepthGrooveParams())
+        b = grooves_from_depth(d, params=DepthGrooveParams(ignore_closer_mm=200.0))
+        assert (a == b).all()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

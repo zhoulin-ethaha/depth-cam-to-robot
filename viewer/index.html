@@ -61,6 +61,12 @@
           <button id="btn-project-cal" title="Open the calibration window on this screen — drag its handles and the projector output follows live">⧉ Calibrate</button>
           <img class="cam-live" id="feed-mask" src="/depth/mask" alt="mask feed" />
           <img class="cam-still hidden" id="prev-mask" alt="mask preview" />
+          <div class="adj-row adj-num" id="mask-ignore" data-key="ignore_closer_mm" data-min="0" data-max="5000" data-step="1" data-default="0"
+               title="Near-object filter: anything closer to the depth camera than this absolute distance (a hand raking, a person leaning over the sand) — and every mask blob touching it — is left out of the mask and the live projection. 0 or empty = off.">
+            <label for="ignore-closer-input">Ignore closer than</label>
+            <input type="number" id="ignore-closer-input" placeholder="off" />
+            <label for="ignore-closer-input">mm</label>
+          </div>
         </div>
       </div>
 
@@ -117,6 +123,7 @@
         <label>Min blob (px)</label><input type="range" /><span class="adj-val"></span></div>
       <p class="adj-note">Discards detected specks smaller than this many pixels before
         thinning — clears isolated noise that isn't part of a real groove.</p>
+
 
       <div class="adj-group-title">Reject natural grooves</div>
       <p class="adj-note">Tools to suppress pre-existing/natural sand grooves and keep only the

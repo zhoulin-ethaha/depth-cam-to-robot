@@ -21,12 +21,17 @@ Mode** (the ⧉ popup on the Depth viewport, `/depths`): an Auto toggle + depth
 trigger run the whole pipeline automatically and lock the manual buttons.
 
 ## Run / test
-- Run: `run.bat` or `.venv\Scripts\python.exe main.py` → Developer Mode at
-  http://localhost:5005 (Participant Mode = its ⧉ popup). Closing the last
-  browser tab kills the server (deliberate, via SIGINT).
-- ALWAYS use `.venv\Scripts\python.exe`; never bare `pip` (broken launcher risk —
-  use `python -m pip`). The venv is NOT relocatable.
-- Unit tests: `.venv/Scripts/python.exe -m pytest -q -m "not integration"` (222, no
+- Run: `run.bat` or the conda-env python (`ENVPY` below) `main.py` → Developer
+  Mode at http://localhost:5005 (Participant Mode = its ⧉ popup). Closing the
+  last browser tab kills the server (deliberate, via SIGINT).
+- Python env = the **`sybil` conda env** (recipe: `environment.yml`;
+  recreate with `conda env create -f environment.yml`). On this machine
+  ENVPY = `C:\Users\linfo\miniconda3\envs\sybil\python.exe` — the .bat
+  files and `.mcp.json` hardcode it; update those paths on a new machine.
+  Never bare `pip` (broken launcher risk — use `<ENVPY> -m pip`). The Intel
+  RealSense USB driver is an OS-level install, outside the env. The old
+  `.venv` is retired.
+- Unit tests: `<ENVPY> -m pytest -q -m "not integration"` (228, no
   hardware). Integration: `-m integration`, needs RealSense/robot + TEST_ROBOT_IP.
 - No CLI modes. Hardware vs no-robot is in the UI: "Test Mode (no robot)" button
   unlocks capture with a synthetic workspace; Run stays gated on a robot connection.
@@ -41,8 +46,13 @@ trigger run the whole pipeline automatically and lock the manual buttons.
    Live JPEGs into shared_state keys (`last_depth_color_jpg` etc.).
 2. **Groove detection** `depth_extractor` — `grooves_and_mask(depth, valid, params,
    reference, mm_per_px)`: gap-fill → denoise → detrend (subtract blurred surface)
-   → threshold (valley/ridge/band, mm relief) → morph close/min-blob → per-stroke
-   filters (reference subtraction, min mean depth, min/max width, min length) →
+   → threshold (valley/ridge/band, mm relief) → morph close/min-blob →
+   near-object rejection (`ignore_closer_mm` > 0: mask blobs touching anything
+   ABSOLUTELY closer to the camera than that — a hand/body over the sand —
+   dilated by GROOVE_NEAR_MARGIN_PX, are dropped; keeps the live projection off
+   objects; UI = the "Ignore closer than (mm)" number box overlaid on the Mask
+   viewport, always visible) → per-stroke filters
+   (reference subtraction, min mean depth, min/max width, min length) →
    (thick mask, 1-px skeleton). `process_depth` adds crop; coords stay full-frame.
 3. **Stroke extraction** `path_extractor.extract_from_edges` — 8-conn chain follow
    → Chaikin smooth → resample at `spacing_mm` (UI Spacing slider 10–100 mm,
@@ -114,17 +124,27 @@ trigger run the whole pipeline automatically and lock the manual buttons.
     fanning out to all browser clients), so Developer windows watch it live.
     Statuses shown big top-right in the popup via `state.participant`.
 
-## Contained prototype: dual-camera stitching (NOT part of the two modes)
+## Contained prototype: Dual-Cam Vision (NOT part of the two modes)
 `run_stitch.bat` → `stitch_main.py` → http://localhost:5006. Merges TWO D435i
 depth feeds (~5-10% frame overlap) into one top-down heightmap covering a
-larger sand area. Modules: `stitcher.py` (pure math: deproject with per-device
-intrinsics → cam2→cam1 rig transform `StitchCalib` (tx/ty/tz mm + yaw, swap) →
-rasterize onto a shared grid; overlap averaged, `refine_shift` = template-match
-XY trim from the overlap band), `dual_camera.py` (owns both RealSense pipelines
-by serial; <2 cameras → SYNTHETIC scene), `stitch_server.py` + `viewer/
-stitch.html`/`stitch.js` (4 MJPEG streams: stitched depth w/ overlap outline,
-RGB (middle gap expected — narrower colour FOV), mask, skeleton; WS: set_calib,
-set_params, auto_refine, save_calib → `stitch_calibration.json`, gitignored).
+larger sand area. Two screens toggled by the Stitch button (`set_stitch{on}`):
+OFF = setup (per-camera live depth+RGB left/right, ⇄ Swap and per-side ⟲
+Rotate 180° buttons for upside-down mounts), ON = combined views. Starts OFF
+unless `stitch_calibration.json` exists. Turning stitch ON auto-runs
+`auto_align` (sweep candidate baselines tx, score overlap relief correlation,
+`refine_shift` trim; fails cleanly on featureless sand — calib unchanged).
+Modules: `stitcher.py` (pure math: deproject with per-device intrinsics →
+cam2→cam1 rig transform `StitchCalib` (tx/ty/tz mm + yaw, swap, rot1/rot2 =
+per-physical-camera 180° flags applied by `apply_orientation` before swap) →
+rasterize onto a shared grid; overlap averaged; `refine_shift` = template-match
+XY trim; `auto_align` = full baseline search), `dual_camera.py` (owns both
+RealSense pipelines by serial; <2 cameras → SYNTHETIC scene; publishes
+per-camera left/right JPEGs in both modes, stitched set only when ON),
+`stitch_server.py` + `viewer/stitch.html`/`stitch.js` (MJPEG: /stitch/depth
+w/ overlap outline, /stitch/rgb (middle gap expected — narrower colour FOV),
+/stitch/mask, /stitch/skel + setup views /cam/{left,right}/{depth,rgb}; WS:
+set_stitch, set_calib, set_params, auto_align, auto_refine, save_calib →
+`stitch_calibration.json`, gitignored; state/init carry `stitch_on`).
 Detection reuses `grooves_and_mask` unchanged on the stitched heightmap.
 Deliberately NOT wired into Developer/Participant Mode or the MCP tools; no
 main-app API change. Cannot run while the main app runs (one process per
@@ -156,7 +176,9 @@ never import `main` from these modules.
   [0,1]; stroke coords always shifted back to full frame before mapping.
 - Mesh files + UI depth params in mm; everything robot-side in m.
 - `config.py` = every constant. `settings.json` = last robot IP + projector
-  corners. Gitignored: `surfaces/`, `paths/`, `presets/`, `settings.json`, `.venv/`.
+  corners. `environment.yml` = the committed conda-env recipe (env = `sybil`).
+  Gitignored: `surfaces/`, `paths/`, `presets/`, `settings.json`, `.venv/`
+  (retired but still ignored as a safety net).
 - Phases: idle → previewing → editing → captured → executing → done | error.
 
 ## Key WS messages (browser ↔ server; external tools may use these)
@@ -214,4 +236,4 @@ never import `main` from these modules.
 - The browser preview reads the Radius slider directly (`readBlendMm()` →
   `rebuildToolpathViz`); `exec_viz.blend_m` from capture_result is only the
   session echo.
-- Test count reference: 222 unit (+6 hardware-gated). Keep green.
+- Test count reference: 228 unit (+6 hardware-gated). Keep green.

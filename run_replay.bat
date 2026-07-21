@@ -12,13 +12,14 @@ echo Starting Toolpath Replay...
 echo (A browser tab will open at http://localhost:5007)
 echo.
 
-if exist ".venv\Scripts\python.exe" (
-    ".venv\Scripts\python.exe" replay_main.py
+REM Hardcoded conda environment (see run.bat / environment.yml).
+set "CONDA_PY=C:\Users\linfo\miniconda3\envs\sybil\python.exe"
+if exist "%CONDA_PY%" (
+    "%CONDA_PY%" replay_main.py
 ) else (
-    echo WARNING: .venv not found - using PATH python. Create it with:
-    echo     python -m venv .venv ^&^& .venv\Scripts\python.exe -m pip install -r requirements.txt
-    echo.
-    python replay_main.py
+    echo ERROR: conda env python not found at %CONDA_PY%
+    echo Create it with:  conda env create -f environment.yml
+    echo then update the CONDA_PY path at the top of this file.
 )
 
 echo.

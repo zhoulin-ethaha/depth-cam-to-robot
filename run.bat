@@ -13,15 +13,18 @@ echo Starting Depth Camera to Robot (Developer Mode)...
 echo (A browser tab will open at http://localhost:5005)
 echo.
 
-REM Use the project's virtual environment so pyrealsense2 and the other pinned
-REM dependencies are found. Falls back to the PATH python only if no venv exists.
-if exist ".venv\Scripts\python.exe" (
-    ".venv\Scripts\python.exe" main.py
+REM Hardcoded conda environment (recreate anywhere with:
+REM     conda env create -f environment.yml
+REM then update CONDA_PY below to that machine's env path).
+REM NOTE: the Intel RealSense USB driver is an OS-level install, NOT part of
+REM the conda env - install it separately on a new machine.
+set "CONDA_PY=C:\Users\linfo\miniconda3\envs\sybil\python.exe"
+if exist "%CONDA_PY%" (
+    "%CONDA_PY%" main.py
 ) else (
-    echo WARNING: .venv not found - using PATH python. Create it with:
-    echo     python -m venv .venv ^&^& .venv\Scripts\python.exe -m pip install -r requirements.txt
-    echo.
-    python main.py
+    echo ERROR: conda env python not found at %CONDA_PY%
+    echo Create it with:  conda env create -f environment.yml
+    echo then update the CONDA_PY path at the top of this file.
 )
 
 REM Keep the window open after the program exits so any error stays visible.

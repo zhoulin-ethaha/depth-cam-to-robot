@@ -517,7 +517,7 @@ function restoreSessionSettings(data) {
   adjRows().forEach((row) => {
     const v = adj[row.dataset.key];
     if (v !== undefined && v !== null && !Number.isNaN(parseFloat(v))) {
-      row.querySelector("input[type=range]").value = v;
+      row.querySelector("input").value = v;
       updateAdjVal(row);
     }
   });
@@ -948,7 +948,7 @@ function adjRows() { return document.querySelectorAll(".adj-row[data-key]"); }
 
 function initAdjustControls() {
   adjRows().forEach(row => {
-    const input = row.querySelector("input[type=range]");
+    const input = row.querySelector("input");   // range slider or number box
     input.min   = row.dataset.min;
     input.max   = row.dataset.max;
     input.step  = row.dataset.step;
@@ -960,8 +960,9 @@ function initAdjustControls() {
 }
 
 function updateAdjVal(row) {
-  const input = row.querySelector("input[type=range]");
-  const span  = row.querySelector(".adj-val");
+  const span = row.querySelector(".adj-val");
+  if (!span) return;                            // number boxes show their own value
+  const input = row.querySelector("input");
   const step  = parseFloat(row.dataset.step);
   span.textContent = step < 1 ? parseFloat(input.value).toFixed(2) : input.value;
 }
@@ -969,7 +970,8 @@ function updateAdjVal(row) {
 function readAdjustments() {
   const adj = {};
   adjRows().forEach(row => {
-    adj[row.dataset.key] = parseFloat(row.querySelector("input[type=range]").value);
+    const v = parseFloat(row.querySelector("input").value);
+    adj[row.dataset.key] = Number.isFinite(v) ? v : 0;   // empty box = off
   });
   adj.detect = document.getElementById("detect-mode").value;
   return adj;
@@ -1000,7 +1002,7 @@ function requestAdjust(immediate) {
 
 document.getElementById("btn-reset-adjust").addEventListener("click", () => {
   adjRows().forEach(row => {
-    const input = row.querySelector("input[type=range]");
+    const input = row.querySelector("input");
     input.value = row.dataset.default;
     updateAdjVal(row);
   });
@@ -1077,7 +1079,7 @@ async function applyPreset(name) {
       const key = row.dataset.key;
       const v = p[key];
       if (v !== undefined && v !== null && !Number.isNaN(parseFloat(v))) {
-        row.querySelector("input[type=range]").value = v;
+        row.querySelector("input").value = v;
         updateAdjVal(row);
       }
     });

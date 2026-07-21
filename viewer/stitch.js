@@ -1,4 +1,4 @@
-/* Dual-camera stitching prototype UI (contained from viewer.js). */
+/* Dual-Cam Vision prototype UI (contained from viewer.js). */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -19,6 +19,8 @@ const PARAM_INPUTS = {
 };
 
 let ws = null;
+let stitchOn = null;      // unknown until init/state arrives
+let lastCalib = {};       // latest calibration from the server (rot/swap flags)
 
 function send(type, params) {
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -33,12 +35,13 @@ function debounce(fn, ms) {
 
 /* ── outgoing ── */
 function calibFromInputs() {
+  // Numeric fields only — the server merges over the current calibration, so
+  // rot/swap set by the setup buttons are untouched.
   const c = {};
   for (const [k, el] of Object.entries(CAL_INPUTS)) {
     const v = parseFloat(el.value);
     if (Number.isFinite(v)) c[k] = v;
   }
-  c.swap = $("cal-swap").checked;
   return c;
 }
 const sendCalib = debounce(() => send("set_calib", calibFromInputs()), 250);
@@ -62,25 +65,81 @@ function refreshOutputs() {
 }
 
 for (const el of Object.values(CAL_INPUTS)) el.addEventListener("input", sendCalib);
-$("cal-swap").addEventListener("change", sendCalib);
 for (const el of Object.values(PARAM_INPUTS)) {
   el.addEventListener("input", () => { refreshOutputs(); sendParams(); });
 }
+
+$("btn-stitch").addEventListener("click", () => {
+  const on = !stitchOn;
+  if (on) showMsg("Stitch on — searching for the overlap…", false);
+  send("set_stitch", { on });
+  applyMode(on);          // optimistic; the next state message confirms
+});
+$("btn-align").addEventListener("click", () => {
+  showMsg("Searching for the overlap…", false);
+  send("auto_align");
+});
 $("btn-refine").addEventListener("click", () => {
   showMsg("Refining from the overlap band…", false);
   send("auto_refine");
 });
 $("btn-save").addEventListener("click", () => send("save_calib"));
 
+/* Setup-mode buttons: rotation is stored per PHYSICAL camera (rot1/rot2, serial
+   order); which one sits in the left panel depends on the swap flag. */
+$("btn-swap").addEventListener("click", () =>
+  send("set_calib", { swap: !lastCalib.swap }));
+$("btn-rot-left").addEventListener("click", () => {
+  const key = lastCalib.swap ? "rot2" : "rot1";
+  send("set_calib", { [key]: !lastCalib[key] });
+});
+$("btn-rot-right").addEventListener("click", () => {
+  const key = lastCalib.swap ? "rot1" : "rot2";
+  send("set_calib", { [key]: !lastCalib[key] });
+});
+
+/* ── mode switching ── */
+function setStreams(container, active) {
+  // Claim MJPEG connections only for the visible mode (Chrome's per-host cap);
+  // spread the four streams across the localhost / 127.0.0.1 buckets.
+  const alt = location.hostname === "127.0.0.1" ? "localhost" : "127.0.0.1";
+  const imgs = [...container.querySelectorAll(".vp img")];
+  imgs.forEach((img, i) => {
+    if (active) {
+      if (!img.src) {
+        const host = i < 2 ? location.host : `${alt}:${location.port}`;
+        img.src = `http://${host}${img.dataset.src}`;
+      }
+    } else if (img.src) {
+      img.removeAttribute("src");   // release the stream connection
+    }
+  });
+}
+
+function applyMode(on) {
+  if (on === stitchOn) return;
+  stitchOn = on;
+  $("views-setup").classList.toggle("hidden", on);
+  $("views-stitch").classList.toggle("hidden", !on);
+  $("fs-align").classList.toggle("dim", !on);
+  const btn = $("btn-stitch");
+  btn.textContent = on ? "Stitch: ON" : "Stitch: OFF — turn on";
+  btn.classList.toggle("on", on);
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    setStreams($("views-setup"), !on);
+    setStreams($("views-stitch"), on);
+  }
+}
+
 /* ── incoming ── */
 function applyCalib(c) {
   if (!c) return;
+  lastCalib = c;
   for (const [k, el] of Object.entries(CAL_INPUTS)) {
     if (document.activeElement !== el && c[k] !== undefined) {
       el.value = (Math.round(c[k] * 10) / 10).toString();
     }
   }
-  if (document.activeElement !== $("cal-swap")) $("cal-swap").checked = !!c.swap;
 }
 
 function applyParams(p) {
@@ -101,13 +160,19 @@ function handle(data) {
   if (data.type === "init") {
     applyCalib(data.calib);
     applyParams(data.params);
+    applyMode(!!data.stitch_on);
   } else if (data.type === "state") {
     applyCalib(data.calib);
+    if (data.stitch_on !== undefined && data.stitch_on !== null) {
+      applyMode(!!data.stitch_on);
+    }
     const i = data.info;
-    $("info").textContent = i
-      ? `${i.serials.join(" + ")} · ${i.size[0]}×${i.size[1]} px · ` +
-        `${i.mm_per_px} mm/px · overlap ${i.overlap_pct}%`
-      : "waiting for frames…";
+    $("info").textContent = !i
+      ? "waiting for frames…"
+      : i.size
+        ? `${i.serials.join(" + ")} · ${i.size[0]}×${i.size[1]} px · ` +
+          `${i.mm_per_px} mm/px · overlap ${i.overlap_pct}%`
+        : `${i.serials.join(" + ")} · setup — orient the feeds, then turn the stitch on`;
     $("note").textContent = data.note || (i && i.synthetic ? "SYNTHETIC scene" : "");
     if (data.refine) showMsg(data.refine.message, !data.refine.success);
   } else if (data.type === "save_result") {
@@ -117,16 +182,9 @@ function handle(data) {
 
 /* ── connection ── */
 function startStreams() {
-  // Chrome caps HTTP/1.1 connections per host NAME and MJPEG streams hold
-  // theirs forever (same gotcha as the projection window). Spread the four
-  // streams across the localhost / 127.0.0.1 buckets so none gets starved.
-  const alt = location.hostname === "127.0.0.1" ? "localhost" : "127.0.0.1";
-  const imgs = [...document.querySelectorAll(".vp img[data-src]")];
-  imgs.forEach((img, i) => {
-    const host = i < 2 ? location.host : `${alt}:${location.port}`;
-    img.src = `http://${host}${img.dataset.src}`;
-    img.removeAttribute("data-src");
-  });
+  if (stitchOn === null) return;      // wait for init to pick the mode
+  setStreams($("views-setup"), !stitchOn);
+  setStreams($("views-stitch"), stitchOn);
 }
 
 function connect() {

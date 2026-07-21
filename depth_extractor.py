@@ -32,7 +32,8 @@ import numpy as np
 
 from config import (
     GROOVE_SMOOTH_SIGMA_PX, GROOVE_DETREND_SIGMA_PX, GROOVE_DEPTH_MM,
-    GROOVE_MIN_BLOB_PX, GROOVE_DETECT, DEPTH_COLOR_NEAR_M, DEPTH_COLOR_FAR_M,
+    GROOVE_MIN_BLOB_PX, GROOVE_DETECT, GROOVE_NEAR_MARGIN_PX,
+    DEPTH_COLOR_NEAR_M, DEPTH_COLOR_FAR_M,
     DEPTH_FPS, DEPTH_WIDTH, DEPTH_HEIGHT, DEPTH_AVERAGE_FRAMES,
     DEPTH_LABELS_MIN_AREA_PX, DEPTH_LABELS_MAX, TRIGGER_MIN_AREA_PX,
 )
@@ -108,6 +109,8 @@ class DepthGrooveParams:
     min_width_mm: float = 0.0        # drop strokes narrower than this (needs mm_per_px)
     max_width_mm: float = 0.0        # drop strokes wider than this (0 = no upper limit)
     min_length_mm: float = 0.0       # drop strokes shorter than this (needs mm_per_px)
+    ignore_closer_mm: float = 0.0    # drop mask blobs touching anything nearer the camera
+                                     # than this ABSOLUTE distance (hand/body; 0 = off)
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "DepthGrooveParams":
@@ -144,6 +147,7 @@ class DepthGrooveParams:
             min_width_mm=_f("min_width_mm", 0.0, 0.0, 50.0),
             max_width_mm=_f("max_width_mm", 0.0, 0.0, 50.0),
             min_length_mm=_f("min_length_mm", 0.0, 0.0, 500.0),
+            ignore_closer_mm=_f("ignore_closer_mm", 0.0, 0.0, 5000.0),
         )
 
 
@@ -198,6 +202,22 @@ def _relief_and_base_mask(
     mask_u8 = (mask.astype(np.uint8)) * 255
     mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
     mask_u8 = _remove_small(mask_u8, params.min_blob_px)
+
+    # Near-object rejection: anything closer to the camera than the ABSOLUTE
+    # cutoff (a hand raking, a person leaning in) is not sand — the object and
+    # the phantom relief the detrend paints around it must not become grooves.
+    # Uses the RAW depth (reference subtraction shifts d), grows the region by
+    # a safety margin, then drops every mask blob touching it.
+    if params.ignore_closer_mm > 0:
+        near = valid & (np.asarray(depth_m, np.float32)
+                        < params.ignore_closer_mm / 1000.0)
+        if near.any():
+            k = 2 * GROOVE_NEAR_MARGIN_PX + 1
+            near_u8 = cv2.dilate(
+                near.astype(np.uint8),
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+            mask_u8 = _remove_touching(mask_u8, near_u8)
+
     return relief_mm, mask_u8, valid
 
 
@@ -466,6 +486,17 @@ def _fill_invalid(d: np.ndarray) -> np.ndarray:
     src[1:] = valid_vals
     filled[nan] = src[labels[nan]]
     return filled
+
+
+def _remove_touching(mask_u8: np.ndarray, region_u8: np.ndarray) -> np.ndarray:
+    """Drop every connected component of the mask that overlaps the region."""
+    n, lbl = cv2.connectedComponents((mask_u8 > 0).astype(np.uint8), 8)
+    if n <= 1:
+        return mask_u8
+    keep = np.ones(n, dtype=bool)
+    keep[0] = False
+    keep[np.unique(lbl[region_u8 > 0])] = False
+    return np.where(keep[lbl], np.uint8(255), np.uint8(0))
 
 
 def _remove_small(mask_u8: np.ndarray, min_px: int) -> np.ndarray:

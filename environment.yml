@@ -1,0 +1,14 @@
+# Conda environment recipe for depth-cam-to-robot.
+# Recreate on any machine with:  conda env create -f environment.yml
+# (Python packages only. The Intel RealSense USB driver is an OS-level
+#  install and lives OUTSIDE this environment — install it separately:
+#  https://github.com/IntelRealSense/librealsense/releases)
+name: sybil
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -r requirements.txt
+      - -r requirements-dev.txt

@@ -162,6 +162,20 @@ independent and **disabled at 0**, so you can A/B the difference:
   short fragments. (Width and length get their mm scale from the drawing's fit onto
   the loaded surface, or from the Test-Mode workspace.)
 
+### Ignoring objects above the sand
+
+Groove detection is *relative* (mm below the local surface), so a hand raking or a
+person leaning over the sandbox creates phantom relief that shows up in the mask —
+distracting when the live projection paints the mask back onto the sand.
+
+The **Ignore closer than (mm)** box (always visible on the **Mask** viewport)
+is an *absolute* cutoff, measured from the depth camera: any pixel nearer than this
+number is treated as "an object above the sand", and every detected groove blob
+touching that region (grown by a small safety margin) is left out of the mask —
+live views, projection, and path generation alike. Set it a little above the sand
+surface's distance (read the numbers off the Participant popup's depth labels);
+0 or empty disables it.
+
 ---
 
 ## Hardware requirements
@@ -184,10 +198,19 @@ D435i is the reference setup here.
 ```bash
 git clone https://github.com/zhoulin-ethaha/depth-cam-to-robot.git
 cd depth-cam-to-robot
-python -m venv .venv
-.venv\Scripts\activate           # Windows  (macOS/Linux: source .venv/bin/activate)
-pip install -r requirements.txt
+conda env create -f environment.yml   # creates the "sybil" env (Python 3.11 + all deps)
+conda activate sybil
 ```
+
+Requires [Miniconda](https://docs.conda.io/en/latest/miniconda.html) (or Anaconda).
+The Intel RealSense **USB driver** is an OS-level install and is *not* part of the
+environment — install it separately from the
+[librealsense releases](https://github.com/IntelRealSense/librealsense/releases).
+
+The `run*.bat` launchers, `.mcp.json`, and the `.claude/` hooks hardcode the env's
+Python path (`C:\Users\linfo\miniconda3\envs\sybil\python.exe`); on a new machine,
+recreate the env and update those paths to match your conda install (see the
+`CONDA_PY` line at the top of each .bat file).
 
 **Dependencies:**
 
@@ -440,7 +463,7 @@ projector-side stream is only computed while the window is open.
 
 ---
 
-## Dual-camera stitching prototype (standalone)
+## Dual-Cam Vision prototype (standalone)
 
 A **contained** prototype — not part of Developer or Participant Mode — that
 merges the feeds of **two** D435i cameras into one combined depth image
@@ -450,10 +473,17 @@ covering a larger sand area, aiming for a **5–10 % frame overlap**.
   app first** — each RealSense can only be owned by one process. With fewer
   than two cameras connected, the tool runs on a **synthetic** sand scene
   (banner shows why) so the UI and calibration workflow can still be tried.
-- The page shows four live views: **combined depth** (the overlap band is
-  outlined), **combined RGB**, and the detected **mask** and **skeleton**. The
-  RGB view has a dark strip in the middle — expected: the colour lens has a
-  narrower field of view than the depth sensor, and depth is the product here.
+- The big **Stitch** button switches between two screens:
+  - **Stitch OFF — setup.** Each camera's live depth and RGB shown side by
+    side. Use **⇄ Swap left/right** if the cameras come up on the wrong sides,
+    and **⟲ Rotate 180°** under either side if a camera is mounted
+    upside-down, until the feeds match reality. (First start opens here;
+    once a calibration has been saved, later starts open stitched.)
+  - **Stitch ON — combined.** Four live views: **combined depth** (the
+    overlap band is outlined), **combined RGB**, and the detected **mask**
+    and **skeleton**. The RGB view has a dark strip in the middle —
+    expected: the colour lens has a narrower field of view than the depth
+    sensor, and depth is the product here.
 - **How it merges:** each camera's depth image is converted to 3D points using
   its own factory intrinsics, camera 2's points are moved into camera 1's
   frame by a fixed rig transform, and both are projected onto one top-down
@@ -461,14 +491,14 @@ covering a larger sand area, aiming for a **5–10 % frame overlap**.
   overlap, the two measurements are **averaged** — the seam region ends up
   *less* noisy than either camera alone.
 - **Aligning the rig (once per mounting):**
-  1. Mount the cameras level, side by side; enter the rough baseline as
-     **tx** (mm). Adjust ty / tz / yaw until the two halves meet.
-  2. Rake a groove **across the seam**, then press **Auto-refine overlap** —
-     the tool measures the residual XY offset from the overlap band and
-     corrects tx/ty (flat sand has nothing to align on).
+  1. Rake a groove **across the seam region** (flat sand has nothing to
+     align on), then turn the stitch on — it automatically searches all
+     plausible camera spacings for the overlap (**Find overlap** retries
+     this any time).
+  2. If needed, trim **tz / yaw** by hand and press **Fine-tune** to
+     re-measure the residual XY offset from the overlap band.
   3. **Save calibration** → `stitch_calibration.json` (gitignored), reloaded
-     automatically next start. **Swap cameras** exchanges the two roles if
-     left/right come up reversed.
+     automatically next start.
 - **Detection parameters** (same engine and meaning as Developer Mode) tune
   the mask/skeleton computed on the stitched heightmap, live at ~4 Hz.
 - Like the main app, closing the last browser tab stops the program.
@@ -594,10 +624,10 @@ depth_cam-to-robot/
 ├── robot_controller.py      # Thread-safe ur-rtde wrapper (moveL, movep paths, EE pose)
 ├── workspace.py             # Planar fallback mapping (Test Mode)
 ├── reach.py                 # Reach-envelope estimate (importable without hardware)
-├── stitcher.py              # Dual-camera prototype: heightmap stitching math
-├── dual_camera.py           # Dual-camera prototype: owns two RealSense pipelines
-├── stitch_server.py         # Dual-camera prototype: aiohttp server (port 5006)
-├── stitch_main.py           # Dual-camera prototype entry point (run_stitch.bat)
+├── stitcher.py              # Dual-Cam Vision: heightmap stitching + auto-align math
+├── dual_camera.py           # Dual-Cam Vision: owns two RealSense pipelines
+├── stitch_server.py         # Dual-Cam Vision: aiohttp server (port 5006)
+├── stitch_main.py           # Dual-Cam Vision entry point (run_stitch.bat)
 ├── toolpath_loader.py       # Replay tool: read saved bundles (path.json OR path.script)
 ├── replay_robot.py          # Replay tool: robot-brand abstraction (UR now, ABB-ready)
 ├── replay_server.py         # Replay tool: aiohttp server (port 5007)
@@ -620,8 +650,8 @@ depth_cam-to-robot/
     ├── projection.html      # Projector output / corner-pin calibration window
     ├── depth_view.html      # Participant Mode popup (depth numbers + Auto + trigger)
     ├── depth_overlay.js     # Popup logic: number overlay, Auto toggle, status chip
-    ├── stitch.html          # Dual-camera stitching prototype UI
-    ├── stitch.js            # Stitch UI logic (calibration + detection controls)
+    ├── stitch.html          # Dual-Cam Vision prototype UI
+    ├── stitch.js            # Dual-Cam Vision logic (setup/stitch modes, calibration)
     ├── replay.html          # Toolpath replay tool UI
     ├── replay.js            # Replay UI logic (connect, pick bundle, run)
     ├── style.css            # Responsive layout

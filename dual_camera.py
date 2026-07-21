@@ -1,5 +1,5 @@
 """
-Capture thread for the dual-camera stitching prototype (stitch_main.py).
+Capture thread for the Dual-Cam Vision prototype (stitch_main.py).
 
 Owns TWO RealSense D435i pipelines (selected by serial number), keeps a short
 rolling buffer per camera for temporal averaging, and every STITCH_EVERY_S
@@ -29,7 +29,8 @@ from config import (
 )
 from depth_extractor import DepthGrooveParams, colorize_depth, encode_jpeg, grooves_and_mask
 from stitcher import (
-    CameraFrame, Intrinsics, StitchCalib, refine_shift, stitch, synthetic_pair,
+    CameraFrame, Intrinsics, StitchCalib, apply_orientation, auto_align,
+    refine_shift, stitch, synthetic_pair,
 )
 
 
@@ -42,7 +43,9 @@ class DualCameraThread:
         self._params = DepthGrooveParams()
         self._calib = StitchCalib()
         self._refine_requested = threading.Event()
+        self._align_requested = threading.Event()
         self._mm_per_px = STITCH_MM_PER_PX
+        self._stitch_on = True
 
     @property
     def running(self) -> bool:
@@ -77,6 +80,19 @@ class DualCameraThread:
         """Run overlap auto-refine on the next stitch cycle."""
         self._refine_requested.set()
 
+    def request_align(self) -> None:
+        """Run the full automatic overlap search on the next cycle."""
+        self._align_requested.set()
+
+    def set_stitch(self, on: bool) -> None:
+        """Stitch ON = combined views; OFF = per-camera setup views only."""
+        self._stitch_on = bool(on)
+        with self._state_lock:
+            self._state["stitch_on"] = self._stitch_on
+
+    def get_stitch(self) -> bool:
+        return self._stitch_on
+
     def _publish_calib(self, refine_msg: Optional[dict] = None) -> None:
         with self._state_lock:
             self._state["stitch_calib"] = self._calib.to_dict()
@@ -99,7 +115,9 @@ class DualCameraThread:
                         pass
         with self._state_lock:
             for k in ("stitch_depth_jpg", "stitch_rgb_jpg",
-                      "stitch_mask_jpg", "stitch_skel_jpg"):
+                      "stitch_mask_jpg", "stitch_skel_jpg",
+                      "stitch_left_depth_jpg", "stitch_left_rgb_jpg",
+                      "stitch_right_depth_jpg", "stitch_right_rgb_jpg"):
                 self._state[k] = None
         print("[stitch] stopped")
 
@@ -197,13 +215,64 @@ class DualCameraThread:
                 time.sleep(0.05)
 
     # ── one stitch + detection cycle ─────────────────────────────────────────
+    def _per_camera_views(self, f1: CameraFrame, f2: CameraFrame,
+                          calib: StitchCalib, params: DepthGrooveParams) -> dict:
+        """Left/right oriented previews for the setup screen (stitch OFF)."""
+        left, right = apply_orientation(f1, f2, calib)
+        out = {}
+        for name, f in (("left", left), ("right", right)):
+            out[f"stitch_{name}_depth_jpg"] = encode_jpeg(
+                colorize_depth(f.depth_m, f.valid, params.near_m, params.far_m))
+            rgb = f.rgb
+            if rgb is None:
+                rgb = np.zeros((*f.depth_m.shape, 3), np.uint8)
+                cv2.putText(rgb, "no RGB frame yet", (12, 32),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (120, 120, 120), 1,
+                            cv2.LINE_AA)
+            out[f"stitch_{name}_rgb_jpg"] = encode_jpeg(rgb)
+        return out
+
     def _process(self, f1: CameraFrame, f2: CameraFrame,
                  synthetic: bool, serials: list[str]) -> None:
         params = self._params
         calib = self._calib
-        result = stitch(f1, f2, calib, self._mm_per_px)
 
         refine_msg = None
+        if self._align_requested.is_set():
+            self._align_requested.clear()
+            found = auto_align(f1, f2, calib, self._mm_per_px)
+            if found is None:
+                refine_msg = {"success": False,
+                              "message": "Auto-align found no overlap — rake a "
+                                         "groove across the seam, then press "
+                                         "Find overlap."}
+            else:
+                self._calib = calib = found
+                refine_msg = {"success": True,
+                              "message": f"Overlap found: tx {found.tx_mm:.0f} mm, "
+                                         f"ty {found.ty_mm:.0f} mm",
+                              "tx_mm": found.tx_mm, "ty_mm": found.ty_mm}
+
+        # Published in BOTH modes so the setup screen is live the moment the
+        # stitch is toggled off.
+        cam_jpgs = self._per_camera_views(f1, f2, calib, params)
+
+        if not self._stitch_on:
+            with self._state_lock:
+                self._state.update(cam_jpgs)
+                for k in ("stitch_depth_jpg", "stitch_rgb_jpg",
+                          "stitch_mask_jpg", "stitch_skel_jpg"):
+                    self._state[k] = None
+                self._state["stitch_info"] = {"synthetic": synthetic,
+                                              "serials": serials}
+                self._state["stitch_calib"] = calib.to_dict()
+                self._state["stitch_on"] = False
+                if refine_msg is not None:
+                    self._state["stitch_refine_result"] = refine_msg
+            return
+
+        result = stitch(f1, f2, calib, self._mm_per_px)
+
         if self._refine_requested.is_set():
             self._refine_requested.clear()
             delta = refine_shift(result)
@@ -243,12 +312,14 @@ class DualCameraThread:
             "overlap_pct": round(float(100.0 * result.overlap.sum() / max(1, n_valid)), 1),
         }
         with self._state_lock:
+            self._state.update(cam_jpgs)
             self._state["stitch_depth_jpg"] = encode_jpeg(depth_view)
             self._state["stitch_rgb_jpg"] = encode_jpeg(result.rgb)
             self._state["stitch_mask_jpg"] = encode_jpeg(mask)
             self._state["stitch_skel_jpg"] = encode_jpeg(skel)
             self._state["stitch_info"] = info
             self._state["stitch_calib"] = calib.to_dict()
+            self._state["stitch_on"] = True
             if refine_msg is not None:
                 self._state["stitch_refine_result"] = refine_msg
 

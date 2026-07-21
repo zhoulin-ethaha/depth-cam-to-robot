@@ -84,6 +84,7 @@ GROOVE_DETREND_SIGMA_PX = 25.0   # blur radius estimating the bare-sand surface
 GROOVE_DEPTH_MM         = 1.5    # how much deeper than the surface counts as a groove
 GROOVE_MIN_BLOB_PX      = 40     # discard connected specks smaller than this
 GROOVE_DETECT           = "valley"  # "valley"=grooves, "ridge"=raised lines, "band"=iso-depth
+GROOVE_NEAR_MARGIN_PX   = 12     # dilation around a too-near object when rejecting its mask blobs
 
 # ── Path extraction ───────────────────────────────────────────────────────────
 CONTOUR_MIN_PIXELS  = 20    # discard contours shorter than this many pixels
@@ -117,7 +118,7 @@ MOVEP_BLEND_M    = 0.0005  # 0.5 mm
 # ── Visualization ─────────────────────────────────────────────────────────────
 VIS_INTERVAL = 0.05  # seconds between WebSocket state broadcasts
 
-# ── Dual-camera stitching prototype (stitch_main.py — CONTAINED) ──────────────
+# ── Dual-Cam Vision prototype (stitch_main.py — CONTAINED) ────────────────────
 # A standalone tool (run_stitch.bat → http://localhost:5006) that merges the
 # depth feeds of TWO D435i cameras into one top-down heightmap covering a larger
 # sand area (~5-10% frame overlap). Deliberately NOT wired into Developer or

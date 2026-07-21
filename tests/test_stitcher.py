@@ -6,8 +6,8 @@ import pytest
 from depth_extractor import DepthGrooveParams, grooves_and_mask
 from stitcher import (
     CameraFrame, Intrinsics, StitchCalib,
-    deproject, fill_small_holes, refine_shift, stitch, synthetic_pair,
-    transform_points,
+    auto_align, deproject, fill_small_holes, refine_shift, rotate180, stitch,
+    synthetic_pair, transform_points,
 )
 
 
@@ -36,8 +36,20 @@ class TestGeometry:
         assert out[0, 2] == pytest.approx(0.81, abs=1e-9)
 
     def test_calib_dict_roundtrip(self):
-        c = StitchCalib(tx_mm=123.4, ty_mm=-5.0, tz_mm=2.0, yaw_deg=1.25, swap=True)
+        c = StitchCalib(tx_mm=123.4, ty_mm=-5.0, tz_mm=2.0, yaw_deg=1.25,
+                        swap=True, rot1=True, rot2=False)
         assert StitchCalib.from_dict(c.to_dict()) == c
+
+    def test_rotate180_negates_rays(self):
+        f = _flat_frame()
+        f.depth_m[10, 20] = 0.9                    # a marker off-centre
+        r = rotate180(f)
+        assert r.depth_m[f.intr.height - 11, f.intr.width - 21] == pytest.approx(0.9)
+        pts, _ = deproject(f.depth_m, f.valid, f.intr)
+        rpts, _ = deproject(r.depth_m, r.valid, r.intr)
+        # Same point set, rotated 180° about the optical axis (x,y negated).
+        assert np.allclose(sorted(pts[:, 0]), sorted(-rpts[:, 0]), atol=1e-9)
+        assert np.allclose(sorted(pts[:, 1]), sorted(-rpts[:, 1]), atol=1e-9)
 
 
 class TestFillHoles:
@@ -129,3 +141,38 @@ class TestRefine:
         apart.tx_mm += 500.0                       # push footprints fully apart
         r = stitch(f1, f2, apart)
         assert refine_shift(r) is None
+
+
+class TestRotationFlags:
+    def test_rot_flag_undoes_upside_down_mounting(self):
+        f1, f2, calib = synthetic_pair(overlap_frac=0.15, yaw2_deg=0.0)
+        # Camera 2 mounted upside-down: its feed arrives rotated 180°.
+        f2_flipped = CameraFrame(f2.depth_m[::-1, ::-1].copy(),
+                                 f2.valid[::-1, ::-1].copy(),
+                                 f2.intr, f2.rgb[::-1, ::-1].copy())
+        a = stitch(f1, f2, calib)
+        b = stitch(f1, f2_flipped, StitchCalib(**{**calib.to_dict(), "rot2": True}))
+        assert abs(a.valid.sum() - b.valid.sum()) / a.valid.sum() < 0.02
+        assert b.depth_m[b.valid].mean() == pytest.approx(
+            a.depth_m[a.valid].mean(), abs=0.002)
+        ol_a = a.overlap.sum() / max(1, a.valid.sum())
+        ol_b = b.overlap.sum() / max(1, b.valid.sum())
+        assert ol_b == pytest.approx(ol_a, abs=0.02)
+
+
+class TestAutoAlign:
+    def test_finds_baseline_from_scratch(self):
+        f1, f2, true_calib = synthetic_pair(overlap_frac=0.15, yaw2_deg=0.0)
+        found = auto_align(f1, f2, StitchCalib(tx_mm=0.0))
+        assert found is not None
+        assert found.tx_mm == pytest.approx(true_calib.tx_mm, abs=15.0)
+        assert found.ty_mm == pytest.approx(0.0, abs=10.0)
+
+    def test_featureless_scene_returns_none(self):
+        rng = np.random.default_rng(1)
+        intr = Intrinsics.nominal()
+        def flat():
+            d = np.full((intr.height, intr.width), 0.8, np.float32)
+            d += rng.normal(0.0, 0.0004, d.shape).astype(np.float32)
+            return CameraFrame(d, np.ones(d.shape, bool), intr)
+        assert auto_align(flat(), flat(), StitchCalib()) is None

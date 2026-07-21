@@ -355,6 +355,36 @@ main {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+.adj-row.adj-num input[type="number"] {
+  background: #14161a;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 11px;
+}
+
+/* Near-object filter box — lives on the Mask viewport, always visible. */
+#mask-ignore {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 11;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: #161616cc;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  padding: 3px 7px;
+}
+#mask-ignore > label {
+  font-size: 10px;
+  color: #bbb;
+  white-space: nowrap;
+  cursor: pointer;
+}
+#mask-ignore input[type="number"] { width: 62px; }
 .adj-row.adj-check {
   display: flex;
   margin-top: 2px;
