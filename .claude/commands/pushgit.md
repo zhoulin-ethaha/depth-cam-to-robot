@@ -22,7 +22,7 @@ Push every local change to GitHub and replace (overwrite) the current branch on
    - If there is nothing staged (clean tree), skip the commit and note it —
      you will still (force-)push in case local commits are ahead of origin.
    - End the commit message with:
-     Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+     Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
 5. Replace the remote branch:
    `git push --force-with-lease origin <branch>`
