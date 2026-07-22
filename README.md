@@ -67,57 +67,46 @@ The browser opens at `http://localhost:5005` in **Developer Mode** (the full man
 
 ## The flow
 
-```
-━━ SENSING ━━━━━━━━━━━━━━━━━━━━━ camera → clean depth still ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+The pipeline turns a raw depth frame into robot motion in eight steps:
 
-RealSense depth frame (metres)
-    │
-    ▼
-temporal averaging (N frames on Capture)   ← cuts per-pixel depth noise ~√N
-    │
-━━ INTERPRETATION ━━━━━━━━━━━━━━ depth still → robot toolpath ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    │
-    ▼
-gap-fill ─► denoise (Gaussian) ─► subtract smooth surface ─► local relief (mm)
-    │
-    ▼
-threshold "a few mm deeper"   ─► morphological close ─► drop small blobs
-    │
-    ▼
-skeletonize                   ← 1-px-wide groove centrelines
-    │
-    ▼
-_chains_from_edges()          ← 8-connected pixel chain follower (visit once)
-    │
-    ▼
-smooth_stroke()               ← Chaikin corner-cutting (2 iterations)
-    │
-    ▼
-resample_stroke()             ← uniform arc-length resampling (Spacing slider,
-    │                             10–100 mm between waypoints; default 10 mm)
-    │
-    ▼
-_order_strokes()              ← TSP nearest-neighbour; minimises pen-up travel
-    │
-    ▼
-SurfaceModel.project_strokes()  ← ray-cast onto the target mesh (STL/OBJ);
-    │                             TCP perpendicular to the surface per waypoint
-    │                             (planar fallback: pixels_to_robot_coords)
-    ▼
-reach check                   ← flags waypoints outside the arm's envelope (red)
-    │
-━━ ACTUATION ━━━━━━━━━━━━━━━━━━ toolpath → robot motion ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    │
-    ▼
-PathExecutor._run()
-    ├─ moveL  retract along the tool axis (safety distance)
-    ├─ moveL  travel to the retracted stroke start
-    ├─ moveL  land on the first waypoint
-    └─ movep  blended process move through the remaining waypoints
-              (Radius-slider blend, default 0.5 mm — identical to the saved path.script)
-         ── repeats per stroke ──
-    └─ moveL  final retract
 ```
+depth-camera frame
+    │   
+    ▼
+groove regions       detect the mm-deep marks; tuned live with the parameters
+    │
+    ▼
+centrelines          thin each groove region to a 1-px-wide skeleton line
+    │
+    ▼
+resampled strokes    drop a waypoint every 10–100 mm along each line
+    │                (Spacing slider; default 10 mm)
+    ▼
+ordered strokes      choose the drawing order that minimises pen-up travel (TSP*)
+    │
+    ▼
+surface projection   cast the strokes onto the 3D target mesh; the tool is kept
+    │                perpendicular to the surface at every waypoint
+    ▼
+reach check          flag any waypoint outside the arm's reach (shown red)
+    │
+    ▼
+path execution       the robot retraces the strokes
+                     (moveL to travel between strokes, movep to draw each one)
+```
+
+**TSP** = the *Travelling-Salesman Problem*: visit every stroke once by the shortest total route. Here it's solved with a fast nearest-neighbour heuristic, so the robot wastes as little time as possible lifting and moving between strokes.
+
+The eight steps group into four phases:
+
+
+| Phase                   | Steps                                                                  | What the phase does                                         |
+| ----------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------- |
+| **Sensing**             | depth-camera frame                                                     | Capture a clean, noise-averaged depth still of the sand     |
+| **Interpretation**      | groove regions → centrelines                                           | Turn raw depth into 1-px groove centrelines                 |
+| **Robotic preparation** | resampled strokes → ordered strokes → surface projection → reach check | Turn the centrelines into an ordered, reachable 3D toolpath |
+| **Actuation**           | path execution                                                         | The robot draws the strokes on the surface                  |
+
 
 
 
@@ -125,73 +114,92 @@ PathExecutor._run()
 
 
 
-### Program structure
+### Program structure (the Hierarchy)
 
 ```
-depth_cam-to-robot
+depth_cam-to-robot 
 │
-├── MAIN APP
-│   │       main.py · run.bat · http://localhost:5005
-│   │       capture → groove detection → strokes → surface mapping → robot
+├─ MAIN APP
 │   │
-│   ├── 🟢 Developer Mode
-│   │       full manual UI: connect, tune, capture, generate, run, save
-│   │       modules:  server, camera_thread, depth_extractor, path_extractor,
-│   │                 surface, registration, reach, path_executor, path_export,
-│   │                 robot_controller, workspace (Test Mode)
-│   │       UI:       viewer/index.html, viewer/viewer.js
-│   │
-│   ├── 🟣 Participant Mode
-│   │       ⧉ popup: Auto toggle + depth trigger run the same pipeline hands-free
-│   │       modules:  automation (state machine)
-│   │                 + the 🟢 pipeline modules it re-drives
-│   │       UI:       viewer/depth_view.html, viewer/depth_overlay.js
-│   │
-│   └── 🟠 Projection
-│           projector shines the detected mask back onto the sand
-│           modules:  camera_thread (mask composition), server
-│           UI:       viewer/projection.html (corner-pin calibration)
+│   └─────── 🟢 Developer Mode  —  full manual UI: connect, tune, capture, generate, run, save
+│     │
+│     │  modules
+│     │  ┌───────────┐ ┌──────────────────┐ ┌────────────────────┐ ┌───────────────────┐
+│     │  │ server.py │ │ camera_thread.py │ │ depth_extractor.py │ │ path_extractor.py │
+│     │  └───────────┘ └──────────────────┘ └────────────────────┘ └───────────────────┘
+│     │  ┌────────────┐ ┌─────────────────┐ ┌──────────┐ ┌──────────────────┐ ┌────────────────┐
+│     │  │ surface.py │ │ registration.py │ │ reach.py │ │ path_executor.py │ │ path_export.py │
+│     │  └────────────┘ └─────────────────┘ └──────────┘ └──────────────────┘ └────────────────┘
+│     │  ┌─────────────────────┐ ┌──────────────┐
+│     │  │ robot_controller.py │ │ workspace.py │  (Test Mode)
+│     │  └─────────────────────┘ └──────────────┘
+│     │  UI
+│     │  ┌───────────────────┐ ┌──────────────────┐
+│     │  │ viewer/index.html │ │ viewer/viewer.js │
+│     │  └───────────────────┘ └──────────────────┘
+│     │
+│     ├─ 🟣 Participant Mode  —  ⧉ popup: Auto toggle + depth trigger run the pipeline hands-free
+│     │     modules
+│     │     ┌───────────────┐
+│     │     │ automation.py │  + the 🟢 pipeline modules it re-drives
+│     │     └───────────────┘
+│     │     UI
+│     │     ┌────────────────────────┐ ┌─────────────────────────┐
+│     │     │ viewer/depth_view.html │ │ viewer/depth_overlay.js │
+│     │     └────────────────────────┘ └─────────────────────────┘
+│     │
+│     └─ 🟠 Projection  —  projector shines the detected mask back onto the sand
+│           modules
+│           ┌──────────────────┐ ┌───────────┐
+│           │ camera_thread.py │ │ server.py │  (mask composition)
+│           └──────────────────┘ └───────────┘
+│           UI
+│           ┌────────────────────────┐
+│           │ viewer/projection.html │  (corner-pin calibration)
+│           └────────────────────────┘
 │
-├── DUAL-CAM VISION — contained PROTOTYPE (in development)
-│   │       stitch_main.py · run_stitch.bat · http://localhost:5006
-│   │
-│   └── 🔵 Stitching
-│           merge two RealSense feeds into one top-down heightmap,
-│           then detect grooves on it with the same engine
-│           modules:  stitcher (rig math), dual_camera (owns both cameras),
-│                     stitch_server, depth_extractor (reused)
-│           UI:       viewer/stitch.html, viewer/stitch.js
+├─ DUAL-CAM VISION  ·  contained prototype (in development)
+│  └─ 🔵 Stitching  —  merge two RealSense feeds into one heightmap, detect grooves (same engine)
+│        modules
+│        ┌─────────────┐ ┌────────────────┐ ┌──────────────────┐ ┌────────────────────┐
+│        │ stitcher.py │ │ dual_camera.py │ │ stitch_server.py │ │ depth_extractor.py │
+│        └─────────────┘ └────────────────┘ └──────────────────┘ └────────────────────┘
+│        UI
+│        ┌────────────────────┐ ┌──────────────────┐
+│        │ viewer/stitch.html │ │ viewer/stitch.js │
+│        └────────────────────┘ └──────────────────┘
 │
-├── TOOLPATH REPLAY — contained tool
-│   │       replay_main.py · run_replay.bat · http://localhost:5007
-│   │
-│   └── ⚪ Replay
-│           re-run a saved bundle from paths/ without the camera
-│           modules:  toolpath_loader (parse bundles), replay_server,
-│                     replay_robot (robot-brand seam: UR today, ABB-ready),
-│                     path_executor + robot_controller (reused)
-│           UI:       viewer/replay.html, viewer/replay.js
+├─ TOOLPATH REPLAY  ·  contained tool
+│  └─ ⚪ Replay  —  re-run a saved bundle from paths/ without the camera
+│        modules
+│        ┌────────────────────┐ ┌──────────────────┐ ┌─────────────────┐
+│        │ toolpath_loader.py │ │ replay_server.py │ │ replay_robot.py │  (current UR, ABB-ready)
+│        └────────────────────┘ └──────────────────┘ └─────────────────┘
+│        ┌──────────────────┐ ┌─────────────────────┐
+│        │ path_executor.py │ │ robot_controller.py │
+│        └──────────────────┘ └─────────────────────┘
+│        UI
+│        ┌────────────────────┐ ┌──────────────────┐
+│        │ viewer/replay.html │ │ viewer/replay.js │
+│        └────────────────────┘ └──────────────────┘
 │
-└── MCP SERVER
-    │       mcp_server/server.py · started by Claude Code via .mcp.json
-    │
-    └── 🤖 AI tools
-            lets an AI agent drive the pipeline through the running main app's
-            HTTP/WS API (thin adapter; deliberately no run() tool — executing
-            robot motion stays a human action)
+└─ MCP SERVER
+   └─ 🤖 AI tools  —  drive the pipeline via the running app's HTTP/WS API
+         modules
+         ┌──────────────────────┐
+         │ mcp_server/server.py │
+         └──────────────────────┘
 ```
 
-Feature tags:
 
-🟢 Developer Mode · 🟣 Participant Mode · 🟠 Projection · 🔵 Dual-Cam · ⚪ Replay · 🤖 MCP · 🔴 shared by all
 
-### File structure
+### File structure (directory style)
 
 ```
 depth_cam-to-robot/
 ├── main.py                  🟢🟣🟠 Entry point: shared state, callbacks, startup, TCP poller
 ├── automation.py            🟣 Participant-Mode state machine (trigger → auto pipeline)
-├── config.py                🔴 All configurable parameters
+├── config.py                🟢🟣🟠🔵⚪🤖 All configurable parameters
 ├── server.py                🟢🟣🟠🤖 aiohttp server: MJPEG feeds, WebSocket, surface upload
 ├── camera_thread.py         🟢🟣🟠 DepthCameraThread: RealSense → depth/RGB/skeleton/mask streams
 ├── depth_extractor.py       🟢🟣🔵 Depth → groove engine: colorize, detect, filter, skeletonize
@@ -211,23 +219,23 @@ depth_cam-to-robot/
 ├── replay_robot.py          ⚪ Replay tool: robot-brand abstraction (UR now, ABB-ready)
 ├── replay_server.py         ⚪ Replay tool: aiohttp server (port 5007)
 ├── replay_main.py           ⚪ Replay tool entry point (run_replay.bat)
-├── settings.py              🔴 Persistent JSON settings (last robot IP + projector corners)
+├── settings.py              🟢🟣🟠⚪ Persistent JSON settings (last robot IP + projector corners)
 ├── mcp_server/              🤖 FastMCP tools wrapping the app's HTTP/WS API
 ├── .mcp.json                🤖 Registers the MCP pipeline server (project scope)
 ├── CLAUDE.md                🤖 AI-assistant repo guide (pipeline, API, gotchas)
-├── environment.yml          🔴 Conda-env recipe ("sandskript": Python 3.11 + all deps)
-├── requirements.txt         🔴 pip dependencies (installed by environment.yml)
-├── requirements-dev.txt     🔴 dev extras: pytest, mcp
+├── environment.yml          🟢🟣🟠🔵⚪🤖 Conda-env recipe ("sandskript": Python 3.11 + all deps)
+├── requirements.txt         🟢🟣🟠🔵⚪🤖 pip dependencies (installed by environment.yml)
+├── requirements-dev.txt     🟢🟣🟠🔵⚪🤖 dev extras: pytest, mcp
 ├── run.bat                  🟢🟣🟠 Main-app launcher (double-click)
 ├── run_stitch.bat           🔵 Dual-Cam launcher
 ├── run_replay.bat           ⚪ Replay launcher
-├── conftest.py              🔴 Pytest shared fixtures
-├── pytest.ini               🔴 Test configuration
-├── settings.json            🔴 Auto-generated: saved app settings (gitignored)
+├── conftest.py              🟢🟣🟠🔵⚪🤖 Pytest shared fixtures
+├── pytest.ini               🟢🟣🟠🔵⚪🤖 Test configuration
+├── settings.json            🟢🟣🟠⚪ Auto-generated: saved app settings (gitignored)
 ├── surfaces/                🟢🟣 Uploaded target meshes (gitignored)
 ├── paths/                   🟢🟣⚪ Saved toolpaths: dated folders of .script/.json/.png (gitignored)
 ├── presets/                 🟢 Saved Detection-Parameter files, named by date (gitignored)
-├── tests/                   🔴 Unit + hardware-gated integration tests
+├── tests/                   🟢🟣🟠🔵⚪🤖 Unit + hardware-gated integration tests
 └── viewer/
     ├── index.html           🟢 Single-page app
     ├── viewer.js            🟢 WebSocket client, UI handlers, Three.js 3D path preview
@@ -238,7 +246,7 @@ depth_cam-to-robot/
     ├── stitch.js            🔵 Dual-Cam Vision logic (setup/stitch modes, calibration)
     ├── replay.html          ⚪ Toolpath replay tool UI
     ├── replay.js            ⚪ Replay UI logic (connect, pick bundle, run)
-    ├── style.css            🔴 Responsive layout
+    ├── style.css            🟢 Responsive layout
     └── lib/
         ├── three.min.js     🟢 Three.js (3D rendering)
         └── OrbitControls.js 🟢 Mouse/touch orbit controls
@@ -246,7 +254,7 @@ depth_cam-to-robot/
 
 Feature tags:
 
-🟢 Developer Mode · 🟣 Participant Mode · 🟠 Projection · 🔵 Dual-Cam · ⚪ Replay · 🤖 MCP · 🔴 shared by all
+🟢 Developer Mode · 🟣 Participant Mode · 🟠 Projection · 🔵 Dual-Cam · ⚪ Replay · 🤖 MCP
 
 ---
 
