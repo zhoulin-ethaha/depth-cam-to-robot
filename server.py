@@ -1,7 +1,6 @@
 import asyncio
 import base64
 import json
-import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -18,9 +17,23 @@ from settings import load_settings, save_settings
 
 _VIEWER_DIR = Path(__file__).parent / "viewer"
 
-# Preset filenames are server-generated timestamps; this also guards the GET
-# route against path traversal (no '/', '\' or '..' can match).
-_PRESET_NAME_RE = re.compile(r"^[\w\-]+\.json$")
+def _safe_preset_path(name: str) -> Path | None:
+    """
+    Resolve a preset filename to a path inside PRESETS_DIR, or None if it is
+    unsafe. Presets may be renamed to ANY filename (spaces, dots, unicode…),
+    so instead of whitelisting characters we require a .json file and confirm
+    the resolved path stays within PRESETS_DIR — which also blocks traversal
+    ('..', absolute paths, embedded separators).
+    """
+    if not name or not name.lower().endswith(".json"):
+        return None
+    if "/" in name or "\\" in name or "\x00" in name:
+        return None
+    base = PRESETS_DIR.resolve()
+    path = (base / name).resolve()
+    if path.parent != base:
+        return None
+    return path
 
 
 class _BroadcastWS:
@@ -319,9 +332,9 @@ class Server:
 
     async def _handle_presets_get(self, request: web.Request) -> web.Response:
         name = request.match_info.get("name", "")
-        if not _PRESET_NAME_RE.match(name):
+        path = _safe_preset_path(name)
+        if path is None:
             return web.json_response({"ok": False, "error": "bad name"}, status=400)
-        path = PRESETS_DIR / name
         if not path.is_file():
             return web.json_response({"ok": False, "error": "not found"}, status=404)
         try:

@@ -31,7 +31,7 @@ trigger run the whole pipeline automatically and lock the manual buttons.
   Never bare `pip` (broken launcher risk — use `<ENVPY> -m pip`). The Intel
   RealSense USB driver is an OS-level install, outside the env. The old
   `.venv` is retired.
-- Unit tests: `<ENVPY> -m pytest -q -m "not integration"` (228, no
+- Unit tests: `<ENVPY> -m pytest -q -m "not integration"` (233, no
   hardware). Integration: `-m integration`, needs RealSense/robot + TEST_ROBOT_IP.
 - No CLI modes. Hardware vs no-robot is in the UI: "Test Mode (no robot)" button
   unlocks capture with a synthetic workspace; Run stays gated on a robot connection.
@@ -93,8 +93,11 @@ trigger run the whole pipeline automatically and lock the manual buttons.
    restricted to the Developer-Mode crop; composed only while a /depths popup
    is connected); WS /ws (JSON); POST /surface/upload;
    GET /status (compact state JSON for tools); GET/POST /presets + GET
-   /presets/{name} (Detection-Parameter slider presets → `presets/<date_time>.json`,
-   gitignored; browser-only, not exposed to MCP tools); /projection (+?cal);
+   /presets/{name} (Detection-Parameter slider presets; saved as
+   `presets/<date_time>.json` but ANY .json in the folder loads — the GET
+   guard (`_safe_preset_path`) allows custom-renamed files, rejecting only
+   traversal via resolved-path containment; gitignored; browser-only, not
+   exposed to MCP tools); /projection (+?cal);
    /depths (the Participant Mode popup: the CROPPED live depth view — the
    /depth/cropped stream, same region as the skeleton/mask views — with
    absolute mm-from-camera labels + Auto toggle + trigger box + big status
@@ -236,4 +239,4 @@ never import `main` from these modules.
 - The browser preview reads the Radius slider directly (`readBlendMm()` →
   `rebuildToolpathViz`); `exec_viz.blend_m` from capture_result is only the
   session echo.
-- Test count reference: 228 unit (+6 hardware-gated). Keep green.
+- Test count reference: 233 unit (+6 hardware-gated). Keep green.
