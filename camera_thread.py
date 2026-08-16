@@ -8,12 +8,14 @@ import numpy as np
 
 from config import (
     DEPTH_AVERAGE_FRAMES, DEPTH_LABELS_EVERY, DEPTH_LABELS_INTERVAL_MM,
+    LIVE_GROOVE_EVERY, PROFILE_EVERY_S, PROFILE_PIPELINE,
     STITCH_MAIN_BIND_TIMEOUT_S, STITCH_MAIN_EVERY_S,
 )
 from depth_extractor import (
     Crop, DepthGrooveParams, colorize_depth, depth_region_labels,
     grooves_and_mask, encode_jpeg, presence_trigger,
 )
+from profiling import StageTimer
 import realsense_source
 from stitcher import (
     CameraFrame, CanvasGrid, StitchCalib, bind_placements, footprint_mm,
@@ -21,11 +23,10 @@ from stitcher import (
 )
 from view_rotation import norm_deg, rotate_image, rotate_size
 
-# How often (in canvases) to recompute the live groove preview. Groove detection
-# is heavier than colorizing — more so on a combined canvas, which is several
-# frames wide — and the sand is static, so we don't need it every canvas: the
-# captured still gets a clean, fully-thinned pass anyway.
-_LIVE_GROOVE_EVERY = 2
+# How often (in canvases) to recompute the live groove preview — now
+# config.LIVE_GROOVE_EVERY, since it is one of the two knobs that decide how
+# fresh the live views are and it belongs beside STITCH_MAIN_EVERY_S.
+_LIVE_GROOVE_EVERY = max(int(LIVE_GROOVE_EVERY), 1)
 
 
 class DepthCameraThread:
@@ -93,6 +94,13 @@ class DepthCameraThread:
         # Last encoded groove/mask/projector JPEGs — kept between canvases so the
         # throttled previews hold their picture instead of blinking.
         self._cached: tuple = (None, None, None)
+        # Diagnostic only (config.PROFILE_PIPELINE): every live view is produced
+        # on THIS thread, so whichever stage is slow delays all the others. The
+        # target rate is what STITCH_MAIN_EVERY_S asks for; the achieved rate is
+        # what the work actually allows.
+        self._timer = StageTimer("canvas", enabled=PROFILE_PIPELINE,
+                                 every_s=PROFILE_EVERY_S,
+                                 target_hz=1.0 / max(STITCH_MAIN_EVERY_S, 1e-6))
 
     @property
     def running(self) -> bool:
@@ -261,16 +269,17 @@ class DepthCameraThread:
         try:
             while not self._stop_event.is_set():
                 got = False
-                for i, camera in enumerate(cameras):
-                    frame = realsense_source.poll(camera)
-                    if frame is None:
-                        continue
-                    z, ok, rgb = frame
-                    with self._frame_lock:
-                        self._buffers[i].append((z, ok))
-                        if rgb is not None:
-                            self._last_rgb[i] = rgb
-                    got = True
+                with self._timer.stage("poll_cameras"):
+                    for i, camera in enumerate(cameras):
+                        frame = realsense_source.poll(camera)
+                        if frame is None:
+                            continue
+                        z, ok, rgb = frame
+                        with self._frame_lock:
+                            self._buffers[i].append((z, ok))
+                            if rgb is not None:
+                                self._last_rgb[i] = rgb
+                        got = True
                 if not got:
                     time.sleep(0.005)
 
@@ -289,7 +298,8 @@ class DepthCameraThread:
 
                 if self._grid is None:
                     self._bind_calib(frames)
-                result = stitch(frames, self._calib, grid=self._grid)
+                with self._timer.stage("stitch"):
+                    result = stitch(frames, self._calib, grid=self._grid)
                 if self._grid is None:
                     self._grid = CanvasGrid.from_result(result)
                     gh, gw = result.depth_m.shape[:2]
@@ -308,10 +318,17 @@ class DepthCameraThread:
 
                 rot = self._rotation   # read once: the three views must agree
                 rgb = result.rgb if result.rgb_valid.any() else None
-                self._publish(rotate_image(result.depth_m, rot),
-                              rotate_image(result.valid, rot),
-                              rotate_image(rgb, rot), canvas_i)
+                with self._timer.stage("view_rotation"):
+                    z_pub = rotate_image(result.depth_m, rot)
+                    ok_pub = rotate_image(result.valid, rot)
+                    rgb_pub = rotate_image(rgb, rot)
+                self._publish(z_pub, ok_pub, rgb_pub, canvas_i)
                 canvas_i += 1
+                # One canvas = one cycle. The report lands here rather than on a
+                # clock of its own, so the numbers describe whole cycles.
+                line = self._timer.cycle()
+                if line:
+                    print(line)
         finally:
             realsense_source.close(cameras)
             with self._state_lock:
@@ -353,8 +370,11 @@ class DepthCameraThread:
                    if (ref is not None and ref.shape == z.shape) else None)
 
         # Colorized depth (FULL canvas — the crop box overlays it client-side).
-        color = colorize_depth(z, ok, params.near_m, params.far_m)
-        ok_color, color_jpg = cv2.imencode(".jpg", color, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        with self._timer.stage("colorize"):
+            color = colorize_depth(z, ok, params.near_m, params.far_m)
+        with self._timer.stage("encode_depth"):
+            ok_color, color_jpg = cv2.imencode(
+                ".jpg", color, [cv2.IMWRITE_JPEG_QUALITY, 80])
 
         # Participant popup: the SAME colorized depth but restricted to the
         # Developer-Mode crop, so the popup shows exactly the region paths are
@@ -363,18 +383,25 @@ class DepthCameraThread:
         # adjust it in Developer Mode.
         with self._state_lock:
             overlay_on = self._state.get("depth_overlay_clients", 0) > 0
-        crop_jpg = encode_jpeg(color[y0:y1, x0:x1]) if overlay_on else None
+        with self._timer.stage("encode_crop"):
+            crop_jpg = encode_jpeg(color[y0:y1, x0:x1]) if overlay_on else None
 
         # Combined colour: buffer the FULL canvas for Capture, but serve the
         # live "rgb" view CROPPED so only the selected region shows.
-        rgb_jpg = encode_jpeg(rgb[y0:y1, x0:x1]) if rgb is not None else None
+        with self._timer.stage("encode_rgb"):
+            rgb_jpg = encode_jpeg(rgb[y0:y1, x0:x1]) if rgb is not None else None
 
         # Live groove + mask preview, restricted to the live crop (throttled).
         if canvas_i % _LIVE_GROOVE_EVERY == 0:
-            mask, skel = grooves_and_mask(
-                z[y0:y1, x0:x1], ok[y0:y1, x0:x1], params, ref_sub, self._mm_per_px
-            )
-            sj, mj = encode_jpeg(skel), encode_jpeg(mask)
+            # Runs every _LIVE_GROOVE_EVERY-th cycle, so expect roughly half the
+            # cycle count here — and note this is INLINE, so whatever it costs is
+            # added to the canvas period and therefore delays the depth view too.
+            with self._timer.stage("detect"):
+                mask, skel = grooves_and_mask(
+                    z[y0:y1, x0:x1], ok[y0:y1, x0:x1], params, ref_sub, self._mm_per_px
+                )
+            with self._timer.stage("encode_mask"):
+                sj, mj = encode_jpeg(skel), encode_jpeg(mask)
             if sj is not None:
                 last_groove_jpg = sj
             if mj is not None:
@@ -387,9 +414,10 @@ class DepthCameraThread:
             with self._state_lock:
                 proj_on = self._state.get("projection_clients", 0) > 0
             if proj_on:
-                full = np.zeros(z.shape, np.uint8)
-                full[y0:y1, x0:x1] = mask
-                fj = encode_jpeg(full)
+                with self._timer.stage("mask_full"):
+                    full = np.zeros(z.shape, np.uint8)
+                    full[y0:y1, x0:x1] = mask
+                    fj = encode_jpeg(full)
                 if fj is not None:
                     last_mask_full_jpg = fj
             else:
@@ -400,10 +428,11 @@ class DepthCameraThread:
         # preview — it's a reference display. Labels cover the CROPPED region
         # only (coords relative to the crop, matching the popup's stream).
         if canvas_i % DEPTH_LABELS_EVERY == 0:
-            labels = (depth_region_labels(z[y0:y1, x0:x1], ok[y0:y1, x0:x1],
-                                          self._label_interval_mm,
-                                          reference=ref_sub)
-                      if overlay_on else None)
+            with self._timer.stage("depth_labels"):
+                labels = (depth_region_labels(z[y0:y1, x0:x1], ok[y0:y1, x0:x1],
+                                              self._label_interval_mm,
+                                              reference=ref_sub)
+                          if overlay_on else None)
             with self._state_lock:
                 self._state["depth_labels"] = labels
                 self._state["depth_labels_size"] = (
@@ -418,9 +447,10 @@ class DepthCameraThread:
         # threshold is a height above the sand (tilt-proof); without one it is
         # the old absolute distance from the camera.
         thr = self._trigger_mm
-        trigger_below = (presence_trigger(z[y0:y1, x0:x1], ok[y0:y1, x0:x1], thr,
-                                          reference=ref_sub)
-                         if thr is not None else None)
+        with self._timer.stage("trigger"):
+            trigger_below = (presence_trigger(z[y0:y1, x0:x1], ok[y0:y1, x0:x1], thr,
+                                              reference=ref_sub)
+                             if thr is not None else None)
         with self._state_lock:
             self._state["trigger_below"] = trigger_below
             if ok_color:

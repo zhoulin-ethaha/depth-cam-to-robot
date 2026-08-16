@@ -40,7 +40,7 @@ robot moves.
   Never bare `pip` (broken launcher risk — use `<ENVPY> -m pip`). The Intel
   RealSense USB driver is an OS-level install, outside the env. The old
   `.venv` is retired.
-- Unit tests: `<ENVPY> -m pytest -q -m "not integration"` (611, no
+- Unit tests: `<ENVPY> -m pytest -q -m "not integration"` (638, no
   hardware). Integration: `-m integration`, needs RealSense/robot + TEST_ROBOT_IP.
 - No CLI modes. Hardware vs no-robot is in the UI: "Test Mode (no robot)" button
   unlocks capture with a synthetic workspace; Run stays gated on a robot connection.
@@ -84,9 +84,13 @@ robot moves.
    Per-camera rolling buffers at the full frame rate; `capture_frame()` averages
    EACH camera (~30 frames ≈1 s, noise ↓√N) and stitches the averages —
    averaging before the warp, not after. Live JPEGs into shared_state keys
-   (`last_depth_color_jpg` etc.) rebuilt every STITCH_MAIN_EVERY_S (~5 Hz), not
-   per frame — warping several frames onto a big canvas 30×/s buys nothing on
-   static sand. The canvas geometry is FROZEN (`stitcher.CanvasGrid`) once every
+   (`last_depth_color_jpg` etc.) rebuilt every STITCH_MAIN_EVERY_S (0.1 s =
+   10 Hz), not per frame — warping onto the canvas 30×/s buys nothing on static
+   sand. The groove/mask preview follows LIVE_GROOVE_EVERY (1 = same rate as
+   depth); those two constants are the ONLY thing setting how fresh the live
+   views are, measured at ~38 ms of work per cycle on a one-camera rig (~40%
+   of a thread at 10 Hz) — `PROFILE_PIPELINE` prints achieved vs target so the
+   headroom is a number, not a guess. The canvas geometry is FROZEN (`stitcher.CanvasGrid`) once every
    camera has delivered its first frame and never changes again; `frame_size` /
    `camera_count` are published to shared_state (and `/status`).
 2. **Groove detection** `depth_extractor` — `grooves_and_mask(depth, valid, params,
@@ -426,6 +430,21 @@ straight onto the shared canvas; overlaps averaged, `coverage` counts
 contributors, `fill_small_holes` closes speckle. Image-space, not deprojection:
 that is what makes a corner drag land exactly where the operator put it, and
 for a near-flat sand plane the two agree to well under a pixel.
+**Seam agreement** `stitcher.seam_report` → `SeamStats` per overlapping pair,
+shipped in `info.seams` and shown under the sidebar buttons (green = aligned,
+amber = height, red = tilt). `stitch` AVERAGES overlapping depths, so a
+per-camera bias is NOT one step but a plateau at half the bias with a step at
+each edge of the overlap band — and a raked groove is ~1.5 mm, so a few mm of
+seam is several times the signal and the detrend paints phantom grooves along
+it. The verdict is the point: `mean_mm` with a small `slope_mm` = a constant
+offset, which is exactly what `height_mm` (the Height ▼▲ buttons) cancels;
+a `slope_mm` comparable to the mean = the cameras differ in ANGLE and no single
+offset can fix it. `height_mm` is INCLUDED in the comparison, so a seam already
+levelled reads "aligned" instead of nagging about a fault that is fixed.
+Deliberately a second pass, not part of `stitch`: it keeps each camera's warped
+plane separately, which is the memory the live path avoids holding — hence
+STITCH_SEAM_EVERY_S throttling and the cache in `MultiCameraThread._seams`,
+which swallows exceptions because a diagnostic must never take the tool down.
 Helpers worth knowing: `rotate_quad` (turn a quad about its centre AND
 re-label its corners, so the picture turns unstretched — pair it with
 `rot_deg`, `MultiCameraThread.rotate_camera` does both plus `_rotate_crop`),
@@ -525,6 +544,23 @@ in no `main`/`camera_thread`/`robot_controller`).
   `shared_state["frame_size"]` / `still_dims` / `camera_thread.frame_size`, never
   from DEPTH_WIDTH/DEPTH_HEIGHT — those two now describe ONE camera's stream.
 - Mesh files + UI depth params in mm; everything robot-side in m.
+- **Live-view profiling** `profiling.StageTimer` + `config.PROFILE_PIPELINE`
+  (False by default, `PROFILE_EVERY_S` = report interval). Every live view is
+  produced on ONE thread (`camera_thread._run` → `_publish`), so a slow stage
+  delays every stage after it and "the mask lags" and "the depth view lags" can
+  be the same fault. Switching it on prints, per window: the ACHIEVED canvas
+  rate against the 1/STITCH_MAIN_EVERY_S target (flagged when it falls below
+  80%), a per-stage breakdown (poll_cameras/stitch/view_rotation/colorize/
+  encode_depth/encode_crop/encode_rgb/detect/encode_mask/mask_full/depth_labels/
+  trigger), and the server's MJPEG counters (`.sent` vs `.new` vs `.KB` per
+  stream) — `_mjpeg_stream` writes at 30 Hz whether or not the picture changed,
+  so `.sent` ÷ `.new` is how much of the traffic is the same frame re-sent.
+  Read the achieved rate FIRST: near target = the cadence is the limit and the
+  work has headroom; well under = the work is the limit and the top stage is
+  where it went. `stage()` returns a shared no-op context manager when
+  disabled, so the hot loop pays one attribute read; keep that property, and
+  keep the flag False in git. One timer per thread — `+=` on its slots is not
+  atomic, so don't share an instance.
 - Console output goes through `module_trace.log(action, msg, extra=())`, which
   prints the task line then `  └ a.py → b.py` naming the modules that served it;
   `module_trace.print_banner()` prints the feature→modules table at startup with
@@ -683,6 +719,16 @@ in no `main`/`camera_thread`/`robot_controller`).
   during the travel.
 - Projection windows intentionally open on `127.0.0.1` (not localhost): Chrome
   caps 6 HTTP/1.1 connections per host and MJPEG streams hold theirs forever.
+- `_mjpeg_stream` sends each picture ONCE (`jpg is not last`) while still
+  polling at 30 Hz. Before that it re-sent whatever was in shared_state every
+  tick — measured at 4.3× for depth and 9× for the mask, ~78% of the bytes
+  being the same frame again, all of it through the event loop that also serves
+  the WebSocket and every other stream (a projection window makes five). MJPEG
+  holds the last frame on screen, so a skipped write is invisible. Don't
+  "simplify" the identity check away, and note it relies on the camera thread
+  publishing a NEW bytes object per frame — which `_publish` does, including
+  for the cached groove/mask JPEGs, whose object only changes when they are
+  actually recomputed.
 - `/`, `/projection`, `/depths`, `/static/*` are served no-cache — but Python
   changes still need an app restart.
 - The rig's camera is MOUNTED AT AN ANGLE (the installation needs it), so the
@@ -831,6 +877,12 @@ in no `main`/`camera_thread`/`robot_controller`).
   files don't change between restarts.
 - The alarm's grit uses a SEEDED rng — `render_all` must be deterministic or
   every regeneration shows up as a binary diff.
+- The seam readout MEASURES, it does not correct. Reporting "cam 1↔2: +6.3 mm,
+  nudge Height by −6.3" and then applying it automatically would be the
+  auto-alignment this tool deliberately does not have — and a bad reading (a
+  hand over the sand while it measures) would silently move the layout. The
+  operator presses the buttons. A per-camera plane solve for the "tilt" verdict
+  would be the natural next step, and it should be an explicit button too.
 - Multi-Cam Vision has no auto-alignment and no detection ON PURPOSE. The
   cameras are bolted down, so an overlap search only ever failed on flat sand;
   and the tool exists to combine images — groove parameters belong in the main
@@ -889,6 +941,6 @@ in no `main`/`camera_thread`/`robot_controller`).
   did come up against a layout that assumed the missing one. Keep the colour
   frame `.copy()`ed there: `np.asarray(frame.get_data())` is a view of SDK
   memory and callers hold the latest colour for seconds.
-- Test count reference: 611 unit (+6 hardware-gated). The `text_guard` OCR
+- Test count reference: 639 unit (1 of them skips when PROFILE_PIPELINE is left ON, +6 hardware-gated). The `text_guard` OCR
   tests skip themselves when Tesseract is absent; the text-matching ones always
   run. Keep green.

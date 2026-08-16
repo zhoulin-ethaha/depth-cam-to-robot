@@ -32,7 +32,7 @@ import numpy as np
 
 from config import (
     STITCH_AVERAGE_FRAMES, STITCH_EVERY_S, STITCH_HEIGHT_STEP_MM,
-    STITCH_MAX_CAMERAS, STITCH_SYNTHETIC_CAMERAS,
+    STITCH_MAX_CAMERAS, STITCH_SEAM_EVERY_S, STITCH_SYNTHETIC_CAMERAS,
 )
 from depth_extractor import colorize_depth, encode_jpeg
 import realsense_source
@@ -40,7 +40,7 @@ from stitcher import (
     CameraFrame, CameraPlacement, StitchCalib,
     bind_placements, common_footprint_mm, crop_mask, default_quad_mm,
     default_row_mm, footprint_mm, load_calib, quad_centre_x, requad_for_crop,
-    rotate_frame, rotate_quad, stitch, swap_quads_x, synthetic_scene,
+    rotate_frame, rotate_quad, seam_report, stitch, swap_quads_x, synthetic_scene,
 )
 
 
@@ -73,6 +73,10 @@ class MultiCameraThread:
         # neighbours, which is exactly what a single-scale row must not do.
         self._tile_mm: Optional[tuple[float, float]] = None
         self._show_colour = False
+        # Seam agreement, refreshed on a slower clock than the canvas (it warps
+        # every camera a second time) and held in between.
+        self._seam_cache: list = []
+        self._seam_at = 0.0
 
     @property
     def running(self) -> bool:
@@ -360,6 +364,24 @@ class MultiCameraThread:
             out[cam_key(i)] = encode_jpeg(view)
         return out
 
+    def _seams(self, frames: list[CameraFrame], calib: StitchCalib) -> list:
+        """
+        Seam agreement, recomputed every STITCH_SEAM_EVERY_S and cached in
+        between. It costs a second set of warps, and the answer only moves when
+        the operator moves something — but it must NOT be frozen on the first
+        frame either, or a Height nudge would appear to do nothing.
+        """
+        now = time.monotonic()
+        if (now - self._seam_at) < STITCH_SEAM_EVERY_S:
+            return self._seam_cache
+        self._seam_at = now
+        try:
+            self._seam_cache = seam_report(frames, calib)
+        except Exception as exc:                 # a diagnostic must never stop the tool
+            print(f"[stitch] seam check failed: {exc}")
+            self._seam_cache = []
+        return self._seam_cache
+
     def _process(self, frames: list[CameraFrame], synthetic: bool) -> None:
         rotated = self._measure(frames)
         self._sync_placements(frames)
@@ -398,6 +420,13 @@ class MultiCameraThread:
             "mm_per_px": round(result.mm_per_px, 3),
             "size": [gw, gh],
             "overlap_pct": round(float(100.0 * result.overlap.sum() / max(1, n_valid)), 1),
+            # Do the cameras AGREE about the sand they can both see? Overlapping
+            # depths are averaged, so a per-camera bias shows up as a step at
+            # each edge of the overlap band — several times a groove's depth,
+            # and enough to make the detrend paint phantom grooves along the
+            # seam. Throttled: it re-warps every camera separately, which is the
+            # memory the live stitch deliberately avoids holding.
+            "seams": [s.to_dict() for s in self._seams(frames, calib)],
         }
         with self._state_lock:
             self._state.update(thumbs)

@@ -642,6 +642,140 @@ def stitch(frames: list[CameraFrame], calib: StitchCalib,
                         mm_per_px, (xmin, ymin), quads_px)
 
 
+# ── seam diagnosis: do two cameras agree where they overlap? ─────────────────
+
+@dataclass
+class SeamStats:
+    """How two cameras disagree about the sand they can both see."""
+    a: int                  # camera index (as passed to seam_report)
+    b: int
+    px: int                 # overlapping pixels both called valid
+    mean_mm: float          # mean(depth_a − depth_b); + = a reads FARTHER
+    std_mm: float           # spread about that mean
+    p95_mm: float           # 95th percentile |difference| — the worst realistic step
+    slope_mm: float         # how much the difference CHANGES across the overlap
+    verdict: str            # "aligned" | "height" | "tilt"
+
+    @property
+    def hint(self) -> str:
+        if self.verdict == "aligned":
+            return "seam is flat — nothing to do"
+        if self.verdict == "height":
+            return (f"constant {self.mean_mm:+.1f} mm step — nudge camera "
+                    f"{self.b + 1}'s Height by {self.mean_mm:+.1f} mm")
+        return (f"disagreement varies by {self.slope_mm:.1f} mm across the seam — "
+                "the cameras differ in ANGLE, so one Height number cannot fix it")
+
+    def to_dict(self) -> dict:
+        return {"a": self.a, "b": self.b, "px": self.px,
+                "mean_mm": round(self.mean_mm, 2), "std_mm": round(self.std_mm, 2),
+                "p95_mm": round(self.p95_mm, 2), "slope_mm": round(self.slope_mm, 2),
+                "verdict": self.verdict, "hint": self.hint}
+
+
+# A seam flatter than this is not worth chasing: it is well under one raked
+# groove's depth, so detection cannot tell it from sand texture.
+SEAM_FLAT_MM = 0.5
+
+
+def _plane_slope_mm(diff: np.ndarray, ys: np.ndarray, xs: np.ndarray) -> float:
+    """
+    Fit `diff ≈ c + gx·x + gy·y` and return how much the plane changes from one
+    end of the overlap to the other. That total swing — not the gradient — is
+    what an operator can compare against the mean step.
+    """
+    if diff.size < 3:
+        return 0.0
+    A = np.stack([np.ones_like(xs, np.float64), xs.astype(np.float64),
+                  ys.astype(np.float64)], axis=1)
+    try:
+        coef, *_ = np.linalg.lstsq(A, diff.astype(np.float64), rcond=None)
+    except np.linalg.LinAlgError:
+        return 0.0
+    _c, gx, gy = coef
+    return float(abs(gx) * (xs.max() - xs.min()) + abs(gy) * (ys.max() - ys.min()))
+
+
+def seam_report(frames: list[CameraFrame], calib: StitchCalib,
+                grid: Optional[CanvasGrid] = None,
+                mm_per_px: Optional[float] = None) -> list[SeamStats]:
+    """
+    Measure, per overlapping pair, how far apart the cameras' depths are where
+    they see the same sand — and say whether that is a HEIGHT difference (one
+    number, fixable with the Height ▼▲ buttons) or a TILT one (varies across the
+    seam, so no single offset can cancel it).
+
+    `stitch` AVERAGES overlapping depths, so a per-camera bias of d mm does not
+    show up as one step but as a plateau at d/2 with a step at each edge of the
+    overlap band. A raked groove is ~1.5 mm deep, so even a few mm of seam is
+    several times the signal and the detrend will paint phantom relief along it.
+
+    Deliberately NOT part of `stitch`: it re-warps each camera separately to
+    keep the per-camera planes, which is exactly the memory the live path avoids
+    holding. This is a button, not a per-frame cost.
+
+    Cameras with no overlap simply produce no entry.
+    """
+    if mm_per_px is None:
+        mm_per_px = calib.mm_per_px
+    prepared = [_prepare(f, calib.placement_for(f.serial, i), i)
+                for i, f in enumerate(frames)]
+    live = [(i, q) for i, q in enumerate(prepared) if q is not None]
+    if len(live) < 2:
+        return []
+
+    if grid is not None:
+        xmin, ymin = grid.origin_mm
+        gw, gh, mm_per_px = grid.width, grid.height, grid.mm_per_px
+    else:
+        if mm_per_px <= 0:
+            mm_per_px = _auto_mm_per_px([q for _i, q in live])
+        corners = np.concatenate([q.quad for _i, q in live])
+        xmin, ymin = float(corners[:, 0].min()), float(corners[:, 1].min())
+        xmax, ymax = float(corners[:, 0].max()), float(corners[:, 1].max())
+        gw = max(16, int(math.ceil((xmax - xmin) / mm_per_px)))
+        gh = max(16, int(math.ceil((ymax - ymin) / mm_per_px)))
+
+    planes: list[tuple[int, np.ndarray, np.ndarray]] = []
+    for i, q in live:
+        dst = (q.quad - np.array([xmin, ymin], np.float32)) / mm_per_px
+        h = cv2.getPerspectiveTransform(q.src, dst.astype(np.float32))
+        src_depth = np.where(q.valid, q.frame.depth_m, 0.0).astype(np.float32)
+        warped = cv2.warpPerspective(src_depth, h, (gw, gh), flags=cv2.INTER_NEAREST)
+        hit = cv2.warpPerspective(q.valid.astype(np.uint8), h, (gw, gh),
+                                  flags=cv2.INTER_NEAREST) > 0
+        # Include height_mm: it is part of what this camera claims the depth is,
+        # so a seam already levelled with the Height buttons must read as flat.
+        planes.append((i, warped + q.height_m, hit))
+
+    out: list[SeamStats] = []
+    for m in range(len(planes)):
+        for n in range(m + 1, len(planes)):
+            ia, da, ha = planes[m]
+            ib, db, hb = planes[n]
+            both = ha & hb
+            px = int(np.count_nonzero(both))
+            if px < 50:                      # a sliver of overlap says nothing
+                continue
+            ys, xs = np.nonzero(both)
+            diff = (da[both] - db[both]) * 1000.0        # metres → mm
+            mean = float(np.mean(diff))
+            std = float(np.std(diff))
+            p95 = float(np.percentile(np.abs(diff), 95))
+            slope = _plane_slope_mm(diff, ys, xs)
+
+            if abs(mean) < SEAM_FLAT_MM and p95 < 2.0 * SEAM_FLAT_MM:
+                verdict = "aligned"
+            elif slope < 0.5 * abs(mean):
+                # One number describes almost all of it → a mounting-height
+                # difference, which is what height_mm exists to cancel.
+                verdict = "height"
+            else:
+                verdict = "tilt"
+            out.append(SeamStats(ia, ib, px, mean, std, p95, slope, verdict))
+    return out
+
+
 # ── synthetic scene (no-hardware fallback + tests) ────────────────────────────
 
 def _world_relief_mm(x: np.ndarray, y: np.ndarray) -> np.ndarray:

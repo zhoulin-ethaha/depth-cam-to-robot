@@ -357,6 +357,7 @@ depth_cam-to-robot/
 ├── text_guard.py            🟣 Profanity guard: OCR the mask, reject offensive drawings
 ├── sound_design.py          🟣🟠 Composes the four participant sound cues → sounds/*.wav
 ├── module_trace.py          🟢🟣🟠 Console: startup feature→module table + per-task module trail
+├── profiling.py             🟢🟣 Diagnostic: where the live views' time goes (off unless PROFILE_PIPELINE)
 ├── config.py                🟢🟣🟠🔵⚪🤖 All configurable parameters
 ├── server.py                🟢🟣🟠🤖 aiohttp server: MJPEG feeds, WebSocket, surface upload
 ├── camera_thread.py         🟢🟣🟠 DepthCameraThread: every RealSense → ONE combined view → depth/RGB/skeleton/mask streams
@@ -694,6 +695,19 @@ A separate app that lays the feeds of **however many** D435i cameras are plugged
 - **Saved, or only adjusted?** The line under the Save button always says which. **Saved — this is what the app uses** means the picture on screen is the picture the robot will draw from. As soon as you turn, move, trim or drag anything it becomes **Adjusted — not saved**, and the Save button turns amber: your changes are live in this window only, and the app is still on the old layout. Nothing else ever writes the file — not a drag, not closing the tool — so **reopening always comes back to your last save**, pixel for pixel.
 - **Discard changes** throws away everything since that save and reloads the file, without restarting the tool. It asks twice (the button changes to *Click again to discard*) so a stray click cannot cost you an evening's alignment.
 - **How it merges:** each camera's cropped, turned picture is warped onto one shared top-down canvas through the corner pin you set, at a uniform mm-per-pixel. Where two cameras overlap, the measurements are **averaged** — the seam region ends up *less* noisy than either camera alone, and the overlap is outlined so you can see it.
+- **Do the cameras agree?** Averaging only helps if they report the *same* depth for the same sand. If one hangs a few mm higher, or leans slightly differently, the overlap averages two different answers and you get a small step at each edge of the seam — and since a raked groove is only ~1.5 mm deep, even a 5 mm seam is several times the signal, enough to show up as false groove lines along the join.
+
+  The panel under the sidebar buttons measures this continuously and colours itself:
+
+  | Colour | Means | What to do |
+  | ------ | ----- | ---------- |
+  | 🟩 green | the cameras agree | nothing |
+  | 🟧 amber | a **constant** step — a height difference | press **Height ▼▲** on the named camera by the amount shown |
+  | 🟥 red | the gap **varies along** the seam — an angle difference | Height can't fix this; re-level the mount, or take the lean out with the corner handles |
+
+  It reads e.g. `cam 1↔2: +6.3 mm (±0.4) — constant +6.3 mm step — nudge camera 2's Height by +6.3 mm`. The `±` is the spread: small means one number describes the whole seam (so one Height nudge cancels it), large means it doesn't. Corrections you've already made are included, so a levelled seam reads green rather than nagging.
+
+  It measures only — it never moves a camera for you. An automatic correction would be the auto-alignment this tool deliberately avoids, and a reading taken with a hand over the sand would quietly wreck your layout.
 - Like the main app, closing the last browser tab stops the program.
 
 
@@ -751,7 +765,8 @@ All parameters live in `config.py`.
 | `DEPTH_FPS`                                | `30`    | Depth stream frame rate                 |
 | `DEPTH_AVERAGE_FRAMES`                     | `30`    | Frames temporally averaged per camera on Capture |
 | `DEPTH_COLOR_NEAR_M` / `DEPTH_COLOR_FAR_M` | `0.0`   | Colormap range in metres (0 = auto)     |
-| `STITCH_MAIN_EVERY_S`                      | `0.2`   | How often the combined live view is rebuilt (s) |
+| `STITCH_MAIN_EVERY_S`                      | `0.1`   | How often the combined live view is rebuilt (s) — raise if the rig can't keep up |
+| `LIVE_GROOVE_EVERY`                        | `1`     | Rebuild the Skeleton/Mask preview every Nth canvas (1 = as often as Depth) |
 | `STITCH_MAIN_BIND_TIMEOUT_S`               | `4.0`   | Wait for every camera's first frame before fixing the view's size |
 
 The combined view is bigger than one camera: with the cameras' own layout it keeps their native detail, so its size follows how much sand the rig covers, not these two numbers. `GET /status` reports it as `frame_size` alongside `camera_count`.
@@ -831,6 +846,42 @@ SOUND_CUES = {
 | -------------------- | ------- | -------------------------------------------------------------------- |
 | `SHOW_MODULE_BANNER` | `True`  | Print the feature→modules table at startup                           |
 | `SHOW_MODULE_TRACE`  | `True`  | Print the `└ a.py → b.py` module trail under each task line          |
+| `PROFILE_PIPELINE`   | `False` | Print where the live views' time goes — see *Why is the live view lagging?* |
+| `PROFILE_EVERY_S`    | `5.0`   | Seconds between profile reports                                      |
+
+---
+
+### Why is the live view lagging?
+
+Every live view comes off **one thread**: it polls each camera, stitches the combined canvas, colorizes it, encodes JPEGs and runs groove detection. So a slow stage delays everything after it, and "the mask lags" and "the depth view lags" are often the same fault. Two constants set the pace:
+
+| View | Rebuilt | Worst-case staleness |
+| ---- | ------- | -------------------- |
+| Depth, RGB | every canvas (`STITCH_MAIN_EVERY_S` = 0.1) | 100 ms |
+| Skeleton, Mask | every canvas (`LIVE_GROOVE_EVERY` = 1) | 100 ms |
+| Depth labels (popup) | every 4th canvas | 400 ms |
+
+Those are the fresh values. They were 0.2 / 2 — 200 ms and 400 ms — which is where the "Depth lags a bit, Mask lags more" came from: the mask was rebuilt half as often as the depth view, so it was twice as stale. Measurement showed the work using only ~15% of the thread, so the rates were raised to spend that headroom; it now runs about 40% busy. **If a bigger rig or a slower machine can't hold 10 Hz, raise `STITCH_MAIN_EVERY_S` back towards 0.2** — the profiler below tells you whether it's keeping up.
+
+If it feels worse than that, set `PROFILE_PIPELINE = True` in `config.py`, restart, and watch the console:
+
+```
+[profile] canvas — 25 cycles in 5.2 s = 4.8 Hz (target 5.0 Hz)
+    detect             1885.0 ms total   145.0 ms x 13     36.2% of window
+    stitch             1875.0 ms total    75.0 ms x 25     36.0% of window
+    encode_depth        450.0 ms total    18.0 ms x 25      8.7% of window
+    ...
+[profile] mjpeg — over 5.0 s
+    depth_color.KB                36,000 total     7,200.0 /s
+    depth_color.new                   25 total         5.0 /s
+    depth_color.sent                 150 total        30.0 /s
+```
+
+**Read the achieved rate first.** Near the target means the cadence is the limit and the work has headroom — the views are as fresh as they were asked to be. Well under it (the report says so) means the work is the limit, and the stage at the top of the list is where the time went. `x 13` versus `x 25` is not a bug: detection deliberately runs every second cycle.
+
+The `mjpeg` block counts frames **sent** against frames **skipped** because the picture hadn't changed. Each picture now goes out once — the streams still look 30 times a second, but a repeat isn't re-transmitted. That removed about 78% of the traffic and, with it, a matching share of the work in the loop that also serves the WebSocket and every other stream (a projection window makes five).
+
+Profiling is off in git and costs nothing while off.
 
 
 

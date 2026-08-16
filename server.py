@@ -13,7 +13,9 @@ from config import (
     DEPTH_PATH, RGB_PATH, GROOVE_PATH, MASK_PATH, WS_PATH, STATIC_PATH,
     SURFACE_UPLOAD_URL, PRESETS_DIR, PARTICIPANT_WARN_S,
     SOUNDS_DIR, SOUNDS_URL_PATH, SOUND_CUES,
+    PROFILE_EVERY_S, PROFILE_PIPELINE,
 )
+from profiling import StageTimer
 from settings import load_settings, save_settings
 
 _VIEWER_DIR = Path(__file__).parent / "viewer"
@@ -142,6 +144,12 @@ class Server:
         self._tool_clients: set[web.WebSocketResponse] = set()
         self._overlay_clients: set[web.WebSocketResponse] = set()  # /depths popups
         self._last_labels: Optional[list] = None   # last depth_labels object sent
+        # Diagnostic only (config.PROFILE_PIPELINE): how much MJPEG traffic is
+        # the same picture re-sent. Ticked from the broadcast loop, which is the
+        # one place here with a steady heartbeat.
+        self._stream_timer = StageTimer("mjpeg", enabled=PROFILE_PIPELINE,
+                                        every_s=PROFILE_EVERY_S,
+                                        report_rate=False)
         self._app = self._build_app()
 
     def _build_app(self) -> web.Application:
@@ -186,11 +194,24 @@ class Server:
         response = web.StreamResponse()
         response.content_type = "multipart/x-mixed-replace; boundary=frame"
         await response.prepare(request)
+        # Send each picture ONCE. The camera thread produces at 1/STITCH_MAIN_EVERY_S
+        # and this loop looks 30 times a second, so without the identity check
+        # every frame went out several times over — measured at 4.3x for depth
+        # and 9x for the mask, i.e. ~78% of the bytes were the same picture
+        # again. MJPEG holds the last frame on screen, so a skipped write is
+        # invisible; what it buys is event-loop time, which is shared with the
+        # WebSocket and with every other stream (a projection window makes five).
+        # Poll rate stays 30 Hz so a new frame still goes out within ~33 ms.
+        last = None
+        short = key.removeprefix("last_").removesuffix("_jpg")   # readable columns
         try:
             while True:
                 with self._lock:
                     jpg = self._state.get(key)
-                if jpg:
+                if jpg and jpg is not last:
+                    last = jpg
+                    self._stream_timer.count(f"{short}.sent")
+                    self._stream_timer.count(f"{short}.KB", len(jpg) / 1024.0)
                     payload = (
                         b"--frame\r\n"
                         b"Content-Type: image/jpeg\r\n\r\n" +
@@ -198,6 +219,8 @@ class Server:
                         b"\r\n"
                     )
                     await response.write(payload)
+                elif jpg:
+                    self._stream_timer.count(f"{short}.skipped")
                 await asyncio.sleep(1 / 30)
         except (ConnectionResetError, asyncio.CancelledError):
             pass
@@ -633,6 +656,11 @@ class Server:
     async def _broadcast_loop(self) -> None:
         while True:
             await asyncio.sleep(VIS_INTERVAL)
+            # Before the client check: the MJPEG counters are worth reading even
+            # when only a stream (and no websocket) is open.
+            line = self._stream_timer.cycle()
+            if line:
+                print(line)
             if not self._ws_clients:
                 continue
 

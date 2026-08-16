@@ -275,6 +275,12 @@ STITCH_MAX_GRID_H     = 1080
 STITCH_MAX_CAMERAS    = 4      # extra devices are ignored (MJPEG/USB bandwidth)
 STITCH_SYNTHETIC_CAMERAS = 3   # cameras faked when no RealSense is attached
 STITCH_HEIGHT_STEP_MM = 2.0    # one press of Raise/Lower on a camera
+# Seam check: how far apart two cameras' depths are where they see the same
+# sand, and whether that gap is a constant HEIGHT step (the Height ▼▲ buttons
+# cancel it) or varies across the seam because the cameras differ in ANGLE (they
+# cannot). Slower than the canvas because it re-warps every camera a second
+# time, and the answer only moves when the operator moves something.
+STITCH_SEAM_EVERY_S   = 1.0    # seconds between seam re-measurements
 # Nominal D435 depth intrinsics (87°×58° FOV) — used for the synthetic fallback
 # and as a sanity default; real runs read exact intrinsics from each device.
 STITCH_NOMINAL_HFOV_DEG = 87.0
@@ -286,7 +292,27 @@ STITCH_NOMINAL_VFOV_DEG = 58.0
 # groove preview and the Participant trigger — is rebuilt on this slower clock,
 # because warping several 640×480 frames onto a big canvas 30 times a second
 # would buy nothing on static sand.
-STITCH_MAIN_EVERY_S    = 0.2    # seconds between live canvas rebuilds (~5 Hz)
+# These two set how fresh the live views are, and they are the ONLY thing
+# setting it — the work costs ~38 ms per cycle on a one-camera rig, so at 10 Hz
+# the camera thread runs about 40% busy and everything else is idle waiting.
+# Raise the interval if a bigger rig (or a slower machine) can't keep up;
+# PROFILE_PIPELINE prints the achieved rate against the target so you can tell.
+STITCH_MAIN_EVERY_S    = 0.1    # seconds between live canvas rebuilds (~10 Hz)
+# Groove/mask preview every Nth canvas. 1 = same rate as the depth view, which
+# is what keeps the Mask viewport from lagging visibly behind Depth; 2 halves
+# its cost at the price of doubling its latency.
+LIVE_GROOVE_EVERY      = 1
+
+# ── Live-view profiling (diagnostic; off by default) ──────────────────────────
+# Both live views come off ONE thread, so a slow stage delays every stage after
+# it. Switch this on to print, every PROFILE_EVERY_S, where the canvas cycle's
+# time went and what rate it ACHIEVED versus the 1/STITCH_MAIN_EVERY_S it aims
+# for — plus how many MJPEG frames each stream sent versus how many were new
+# pictures. Read the achieved Hz first: near target = the cadence is the limit
+# and the work has headroom; well under = the work is the limit, and the top
+# stage in the list is where the time is. Costs nothing while False.
+PROFILE_PIPELINE = False
+PROFILE_EVERY_S  = 5.0    # seconds between profile reports
 # Wait this long for every camera's first frame before freezing the canvas
 # geometry. Freezing early would size the canvas to a partial rig.
 STITCH_MAIN_BIND_TIMEOUT_S = 4.0
