@@ -51,6 +51,14 @@ single camera's 640×480 frame — is what `capture_image` freezes and what
 nothing about the tool call changes; `app_status` reports `camera_count` and
 `frame_size` when the actual pixel size matters.
 
+If `camera_count` is lower than the rig physically has, the app may have been
+started with `SANDSKRIPT_CAMERAS=N` — a diagnostic cap used when measuring how
+the pipeline scales with camera count (see the README's *What gets slower when
+you add a camera*). The canvas is then genuinely smaller, so `frame_size` and
+every normalized crop still agree with each other; it is not a stale reading.
+There is no tool to set or clear the cap: it is an environment variable on the
+app's own process, and a capped run is for measuring, not for drawing.
+
 That canvas can also be **turned** in quarter turns from Developer Mode (the ⟳
 button on the Depth viewport). The turn is applied where the canvas is built, so
 everything these tools see is already turned: `frame_size` reports the turned

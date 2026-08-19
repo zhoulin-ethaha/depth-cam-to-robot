@@ -81,9 +81,28 @@ robot moves.
    `rot_deg` in Multi-Cam Vision (that is a mounting angle baked in before
    stitching); this turns the whole picture, live, without touching the layout
    file. Persisted in settings.json (`view_rotation`) — it describes the rig.
-   Per-camera rolling buffers at the full frame rate; `capture_frame()` averages
+   Per-camera rolling buffers at the full frame rate, filled by a DEDICATED
+   READER THREAD (`camera_thread._reader`, started by `_run`) — deliberately
+   NOT the canvas loop. Polling used to share that loop, which worked only
+   while it had time to spare: with the work filling the period the cameras
+   were asked once per canvas and the buffers filled at the CANVAS rate
+   (measured: 9 fps/camera instead of 30 on a two-camera rig), silently
+   stretching what Capture averages from 1 s of history to 3.3 s. The buffers
+   are what the robot's still is built from, so they must not be paced by how
+   long a canvas takes to draw. The reader has its OWN `StageTimer`
+   (`_read_timer`, label `reader`, target DEPTH_FPS) since a timer is
+   single-thread; the canvas timer reports `frames_read` per cycle from a
+   counter only the reader increments. `_run` stops the reader BEFORE
+   `realsense_source.close` — polling a stopped pipeline is the one ordering
+   that must not happen.
+   `capture_frame()` averages
    EACH camera (~30 frames ≈1 s, noise ↓√N) and stitches the averages —
-   averaging before the warp, not after. Live JPEGs into shared_state keys
+   averaging before the warp, not after. **How far back that average actually
+   reaches is MEASURED, not assumed**: `_stamps` records each buffered frame's
+   arrival time and `refill_seconds()` returns how long until every frame now
+   in the buffers has been replaced (slowest camera wins, ≥ the nominal
+   DEPTH_AVERAGE_FRAMES/DEPTH_FPS, ≤ CAPTURE_REFILL_MAX_S). That is what the
+   two "wait for the buffer to refill" pauses in main.py use. Live JPEGs into shared_state keys
    (`last_depth_color_jpg` etc.) rebuilt every STITCH_MAIN_EVERY_S (0.1 s =
    10 Hz), not per frame — warping onto the canvas 30×/s buys nothing on static
    sand. The groove/mask preview follows LIVE_GROOVE_EVERY (1 = same rate as
@@ -105,6 +124,29 @@ robot moves.
    `showReferenceMode`) → per-stroke filters
    (reference subtraction, min mean depth, min/max width, min length) →
    (thick mask, 1-px skeleton). `process_depth` adds crop; coords stay full-frame.
+2a. **Live mask steadiness** — the LIVE preview only; the captured still shares
+   none of it. A D435i's per-pixel noise (~1–2 mm at a metre) is the size of the
+   ~1.5 mm relief `GROOVE_DEPTH_MM` looks for, so thresholding ONE raw frame
+   made every pixel near a groove edge a coin flip 10×/s — which on the
+   projector reads as a mask twitching in width and length over sand nobody is
+   touching. Capture never had the problem (it averages DEPTH_AVERAGE_FRAMES
+   first), so the fix is to give the live path the same two things:
+   (1) `camera_thread._steady_depth` — an exponential average of the CANVAS
+   depth (`LIVE_DEPTH_EMA_ALPHA`, ~2.6× less noise at 0.25), feeding detection
+   ONLY: the depth view stays raw (it is the operator's ground truth) and so do
+   the depth labels and the Participant trigger (both must react to a hand at
+   once, not half a second later). A dropped pixel holds its last value for
+   `LIVE_DEPTH_HOLD_CYCLES` rather than punching a hole — bounded, so a camera
+   that dies still blanks its part of the canvas instead of showing a fossil.
+   (2) `grooves_and_mask(prev_mask=, hysteresis=)` — a thermostat deadband
+   (`LIVE_MASK_HYSTERESIS`): a lit pixel stays lit while its relief holds above
+   that FRACTION of the entry threshold, via `_threshold_relief(relief, params,
+   strictness)` (the same test, judged twice). Applied BEFORE morph/min-blob so
+   a held pixel keeps its blob over the size cut — a blob popping in and out
+   whole is what reads as the mask changing LENGTH. The mask fed back is the
+   FILTERED one, so a blob the stroke filters rejected has to re-earn entry
+   rather than being kept alive. Both default OFF in `depth_extractor`, which
+   is what keeps them out of Capture. ~2.2 ms/cycle on a one-camera canvas.
 2b. **Height above the sand** `depth_extractor.surface_height_mm(depth, valid,
    reference)` → `(height_mm, ok)` or None. `(reference − depth)·1000`: positive
    = nearer the camera than the baseline (a hand), negative = a groove, ~0 =
@@ -291,6 +333,23 @@ robot moves.
    connected (`projection_clients`); corners persist in settings.json; Capture
    auto-blanks projector and waits for buffer refill before averaging. The
    projection page is also the audio output — see stage 10c.
+   It is also the one view whose delivery cost is visible to a participant:
+   projection.html holds the mask in an `<img>` inside a `matrix3d`-warped
+   layer, so every NEW frame is a JPEG decode plus a re-composite of a
+   full-screen GPU layer at projector resolution. `_mjpeg_stream`'s dedupe does
+   not help — it compares the JPEG OBJECT and an encode is always a fresh one —
+   so a mask standing perfectly still was still costing all of that 10×/s, and
+   the projection visibly trailed the Mask viewport. `camera_thread._needs_resend`
+   / `_mark_sent` compare the PICTURE against the last one SENT (per stream, in
+   `self._sent`) and simply leave the cached JPEG in place otherwise, which is
+   what makes the stream go quiet. Knobs in config: `PROJECTION_CHANGE_PX` (how
+   many pixels must differ — projector only; the dev Mask/Skeleton views are
+   exact), `PROJECTION_KEEPALIVE_S` (resend anyway, so silence is not mistaken
+   for death) and `PROJECTION_EVERY_S` (a floor between CHANGED projector
+   frames; 0 = off, the right default since a change is what the participant is
+   waiting for). Measured: still sand 90 canvases → ~0 frames, while a groove
+   is being raked → most frames still go. Only works BECAUSE of stage 2a — a
+   shimmering mask differs every frame and would never match.
 10. **Participant Mode** `automation.ParticipantAutomation` (pure state machine)
     + `_participant_loop`/`_participant_pipeline` in main.py. Lives in the
     /depths popup: an **Auto toggle** (`set_automation{on}`) + a trigger
@@ -548,19 +607,49 @@ in no `main`/`camera_thread`/`robot_controller`).
   (False by default, `PROFILE_EVERY_S` = report interval). Every live view is
   produced on ONE thread (`camera_thread._run` → `_publish`), so a slow stage
   delays every stage after it and "the mask lags" and "the depth view lags" can
-  be the same fault. Switching it on prints, per window: the ACHIEVED canvas
+  be the same fault. Switching it on prints, per window: a header naming the
+  RIG it measured (`set_context` → cameras | canvas px | mm/px, set once the
+  canvas freezes), the ACHIEVED canvas
   rate against the 1/STITCH_MAIN_EVERY_S target (flagged when it falls below
-  80%), a per-stage breakdown (poll_cameras/stitch/view_rotation/colorize/
-  encode_depth/encode_crop/encode_rgb/detect/encode_mask/mask_full/depth_labels/
-  trigger), and the server's MJPEG counters (`.sent` vs `.new` vs `.KB` per
+  80%), a **`work` line** = top-level ms/cycle against the budget the target
+  rate allows (the headroom number), a per-stage table (stitch/
+  view_rotation/colorize/
+  encode_depth/encode_crop/encode_rgb/steady/detect/encode_mask/mask_full/
+  depth_labels/trigger) with total / **ms/cyc** / ms/call / max / calls,
+  the `*.held` counts (frames NOT re-encoded because the
+  picture had not changed — stage 9), `frames_read` (camera frames buffered per
+  canvas — expected DEPTH_FPS × cameras ÷ canvas rate; a shortfall means the
+  reader is behind, which stretches what Capture averages), a SECOND report
+  from the reader thread (`[profile] reader`, its own timer, target DEPTH_FPS),
+  and the server's MJPEG counters (`.sent` vs `.new` vs `.KB` per
   stream) — `_mjpeg_stream` writes at 30 Hz whether or not the picture changed,
   so `.sent` ÷ `.new` is how much of the traffic is the same frame re-sent.
   Read the achieved rate FIRST: near target = the cadence is the limit and the
   work has headroom; well under = the work is the limit and the top stage is
-  where it went. `stage()` returns a shared no-op context manager when
+  where it went. **ms/cyc, not ms/call, is the comparable column** — it is
+  total ÷ CANVASES, so a stage throttled by LIVE_GROOVE_EVERY reports what it
+  truly costs per canvas.
+  A **dotted stage name is a BREAKDOWN of its parent** (`stitch.warp_rgb`,
+  `detect.blur`): printed indented under it and excluded from the `work` sum,
+  since its time is already inside the parent's. `stitch` and
+  `grooves_and_mask` take an optional `timer=NULL_TIMER` and record their own
+  parts — `stitch.prepare/alloc/warp_depth/warp_rgb/blend` and
+  `detect.prep/blur/threshold/morph/near/skeleton/filters` — which is what
+  separates *per-camera* cost (the warps) from *per-canvas-area* cost (blend,
+  blur, colorize). Both keep pure defaults so the capture path measures
+  nothing. `stage()` returns a shared no-op context manager when
   disabled, so the hot loop pays one attribute read; keep that property, and
   keep the flag False in git. One timer per thread — `+=` on its slots is not
-  atomic, so don't share an instance.
+  atomic, so don't share an instance (NULL_TIMER is the exception: disabled, so
+  it accumulates nothing).
+- **Scaling test** (how a bigger rig behaves): `SANDSKRIPT_CAMERAS=N` caps the
+  MAIN APP at N cameras (`config.CAMERA_LIMIT`, 0 = all, clamped by
+  STITCH_MAX_CAMERAS) and `SANDSKRIPT_PROFILE=1` turns profiling on, both
+  without editing config.py — which is the point, since a leftover `True` slows
+  every later run silently. Cameras are enumerated by serial and sorted, so a
+  cap takes the same first N every time, and an unopened camera streams
+  nothing, so a cap is equivalent to unplugging. Run 1, then 2, then 3 and
+  compare the `work` lines; the header says which run is which.
 - Console output goes through `module_trace.log(action, msg, extra=())`, which
   prints the task line then `  └ a.py → b.py` naming the modules that served it;
   `module_trace.print_banner()` prints the feature→modules table at startup with
@@ -568,7 +657,12 @@ in no `main`/`camera_thread`/`robot_controller`).
   `STAGES` (a test asserts every STAGES module exists in `FEATURES`). Only
   process-lifecycle lines stay bare `print()`. Flags: SHOW_MODULE_BANNER /
   SHOW_MODULE_TRACE.
-- `config.py` = every constant. `settings.json` = last robot IP + projector
+- `config.py` = every constant, and the ONE file with environment overrides:
+  `SANDSKRIPT_PROFILE` → `PROFILE_PIPELINE`, `SANDSKRIPT_CAMERAS` →
+  `CAMERA_LIMIT` (both diagnostic; `_env_flag`/`_env_int` ignore nonsense and
+  fall back to the committed value). Nothing that decides what the ROBOT does
+  may become an env override — a setting the arm obeys must be readable in the
+  file. `settings.json` = last robot IP + projector
   corners + `view_rotation` (the canvas quarter turn; read once at start-up,
   before the camera thread starts, so the first frame is already turned). `docker/docker-compose.yml` = the committed ROS bridge (pinned
   driver image, 8 h rosbridge timeout, `robot_ip`).
@@ -731,6 +825,44 @@ in no `main`/`camera_thread`/`robot_controller`).
   actually recomputed.
 - `/`, `/projection`, `/depths`, `/static/*` are served no-cache — but Python
   changes still need an app restart.
+- The change check (stage 9) compares against the last picture SENT, never the
+  last one computed. With a pixel tolerance that distinction is the whole
+  safety: forgiving a small difference each cycle against a moving reference
+  would let the picture drift away indefinitely, while against a fixed one the
+  differences accumulate until they cross. Don't "optimize" it into comparing
+  consecutive frames.
+- Leaving the cached JPEG object in place IS the mechanism — `_mjpeg_stream`
+  skips a write when the object is identical. So a stream is silenced by NOT
+  reassigning it, not by any new server-side flag. That also means the
+  camera thread must keep publishing a new bytes object whenever the picture
+  genuinely changed, which `encode_jpeg` does.
+- `PROJECTION_EVERY_S` defaults to 0 (off) on purpose. It is the cure for a
+  BACKLOG — a projection window falling progressively further behind — and it
+  makes a CONSTANT lag slightly worse, since it can only delay a frame. Diagnose
+  which one you have before reaching for it: growing = backlog, constant =
+  decode cost.
+- The live-mask dampers (stage 2a) must NEVER reach the captured still. The
+  robot's path is judged on its own freshly averaged frame; a path that
+  inherited a held-over mask would draw a groove the sand no longer has. That
+  boundary is held by defaults — `prev_mask=None`, `hysteresis=1.0` in
+  `depth_extractor` — and by `capture_frame` averaging the raw per-camera
+  buffers itself, never `_z_avg`. Two tests assert both. Don't "unify" the live
+  and capture detection paths to save a few lines.
+- Smoothing the live depth is deliberately NOT applied to the depth view, the
+  depth labels or the Participant trigger. The trigger is the one that matters:
+  an EMA there would delay Alerted by its whole settling time AND smear an
+  entering hand into the baseline, so a threshold tuned on still sand would fire
+  late or not at all. Detection can afford the lag because it runs on sand that
+  is by definition finished being drawn.
+- The hysteresis memory is dropped whenever what is being detected changes
+  underneath it — `set_live_params`, `set_live_crop`, `set_reference`,
+  `set_view_rotation` all call `_forget_live_mask`. Without that a slider drag
+  argues with a mask holding the old answer, and the control feels broken. The
+  view rotation additionally drops `_z_avg`/`_ok_avg`/`_stale` explicitly: a
+  180° turn keeps the canvas SHAPE, so the shape check alone would blend the
+  old orientation into the new one.
+- The stale-pixel counter saturates instead of wrapping. It is uint8, and a
+  255 → 0 roll would resurrect a dead camera's last picture as if it were live.
 - The rig's camera is MOUNTED AT AN ANGLE (the installation needs it), so the
   sand's own depth spans more than a hand's clearance above it. That is why the
   trigger and `ignore_closer_mm` go through `surface_height_mm` (stage 2b) and
@@ -753,9 +885,16 @@ in no `main`/`camera_thread`/`robot_controller`).
 - `depth_region_labels` bands SIGNED values now, so band 0 is the sand itself.
   Invalid pixels use an int32-min sentinel, not 0 — the old `+1` offset would
   merge every invalid pixel into the sand's own band.
-- Participant Sensing waits DEPTH_AVERAGE_FRAMES/DEPTH_FPS before capturing:
-  the averaged still uses the PAST second, which would contain the hand
-  otherwise. Keep that wait ≥ the buffer length.
+- Participant Sensing waits `camera_thread.refill_seconds()` before capturing,
+  and projector blanking waits the same: the averaged still reaches BACK over
+  the whole rolling buffer, which would contain the hand (or the projected
+  light) otherwise. It was `DEPTH_AVERAGE_FRAMES/DEPTH_FPS`, and that is only
+  right while every camera frame is caught — a rig that misses frames holds the
+  same 30 frames spanning several seconds, so the derived figure was silently
+  too short and the hand stayed in the picture the robot drew from. Never
+  reintroduce that expression in main.py (a test greps for it). `refill_seconds`
+  can only ever LENGTHEN the wait — it is floored at the nominal value — so
+  nothing downstream gets less settling time than it used to.
 - Blended linear motion assumes neighbouring waypoints don't flip the wrist —
   surface projection chains tool-X for minimal twist; keep that property.
 - Multi-surface parts are NEVER re-centred — preserving the authored coordinates
@@ -936,11 +1075,41 @@ in no `main`/`camera_thread`/`robot_controller`).
 - `scheduler.py` must not grow its own "is this a bundle?" rule. It calls
   `toolpath_loader.list_toolpaths` precisely so the Scheduler and the replay
   tool always list the same folders.
+- The profile report is deliberately **pure ASCII**, including the `<- BELOW
+  TARGET` marker that used to be a `←`. `print()` encodes with the console's
+  codepage and cp1252 has no arrow, so the old header could raise
+  UnicodeEncodeError inside the camera thread — and only on the reports carrying
+  bad news, which is the worst possible time for a diagnostic to become the
+  fault. A test asserts it. Don't decorate it.
+- A `timer=` argument is diagnostic ONLY and must never change behaviour.
+  `stitcher.stitch` and `depth_extractor.grooves_and_mask` both default to
+  `NULL_TIMER`, so the capture path — the one the robot draws from — measures
+  nothing and is unperturbed. Same boundary as the live-mask dampers, and a
+  test asserts both defaults.
+- Sub-stage names must keep their parent's exact prefix (`stitch.*`, `detect.*`)
+  because the report nests on the dot and the `work` total excludes children. A
+  part renamed out of its family would be counted twice and read as a stage
+  that appeared out of nowhere.
+- The camera reader and the canvas loop are two threads ON PURPOSE and must
+  stay that way. Merging them back is what caused the capture bug above: the
+  moment the canvas work fills its period, a shared loop stops reading cameras.
+  They share `_frame_lock` (buffers, stamps, last colour) and nothing else; the
+  reader writes `_frames_read` and no other thread does.
+- The canvas loop waits to its DEADLINE (`_stop_event.wait(due - now)`), not in
+  fixed 5 ms lumps. The old form fired at the first wake AFTER the deadline,
+  costing ~10 ms of period on every rig measured. Waiting on the stop event
+  rather than sleeping is also what keeps shutdown immediate — don't swap it
+  back to `time.sleep`.
+- `CAMERA_LIMIT` is committed as 0 and a test asserts it. It changes how many
+  cameras the app opens, so a leftover cap would shrink the canvas — and with
+  it the crop, the reference and every mm-per-pixel number derived from the
+  frame size — with nothing on screen saying why. `_run` prints a line when it
+  is set, for the same reason.
 - `realsense_source` is the ONE place a RealSense is opened, and it returns
   either every camera or none — a partial start would place the cameras that
   did come up against a layout that assumed the missing one. Keep the colour
   frame `.copy()`ed there: `np.asarray(frame.get_data())` is a view of SDK
   memory and callers hold the latest colour for seconds.
-- Test count reference: 639 unit (1 of them skips when PROFILE_PIPELINE is left ON, +6 hardware-gated). The `text_guard` OCR
+- Test count reference: 708 unit (1 of them skips when PROFILE_PIPELINE is left ON, +6 hardware-gated). The `text_guard` OCR
   tests skip themselves when Tesseract is absent; the text-matching ones always
   run. Keep green.

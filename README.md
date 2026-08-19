@@ -540,6 +540,19 @@ Real sand surfaces sag and tilt, so a fixed absolute depth band picks up the *sl
 
 The single biggest quality win is **temporal averaging**: the sand is static, so Capture averages `DEPTH_AVERAGE_FRAMES` frames, cutting per-pixel depth noise by ~√N before any detection runs.
 
+#### Why Capture waits before it captures
+
+Because Capture averages the *last 30 frames*, it reaches backwards in time. If a participant's hand left the sandbox half a second ago, it is still in most of those frames. So Participant Mode waits for the rolling buffer to refill with hand-free frames before capturing, and the projector is blanked with the same wait before it — its light on the sand would otherwise be baked into the picture the robot draws from.
+
+**How long that wait needs to be is measured, not assumed.** It used to be `DEPTH_AVERAGE_FRAMES / DEPTH_FPS` — 30 frames at 30 fps, one second — which is right only while every camera frame is being caught. Profiling a two-camera rig found the buffers filling at 9 fps instead of 30, so the same 30 frames spanned **3.3 seconds** while the code waited 1.3. Nothing looked wrong; the live view is only rebuilt 9 times a second anyway. What was wrong was that the participant's hand could still be in the averaged still.
+
+Two changes fixed it:
+
+- **The cameras are read on their own thread** (`camera_thread._reader`). Reading used to share the loop that builds the combined view, which was fine while that loop had spare time — it asked each camera ~18 times per rebuild and caught everything. Once the rebuild work filled the period it asked once, and the buffers filled at the *rebuild* rate. The buffers feed the robot; they must not be paced by how long a picture takes to draw.
+- **Each buffered frame is timestamped**, so `refill_seconds()` reports how long until every frame currently held has been replaced — for the slowest camera, floored at the nominal one second (it can only ever lengthen a wait) and capped by `CAPTURE_REFILL_MAX_S` so a camera that has stopped delivering cannot stall the installation.
+
+> 💡 If profiling is on, `frames_read` in the canvas report is camera frames buffered per rebuild. Expect `DEPTH_FPS × cameras ÷ rebuild rate`; well under that means the reader is falling behind, which is worth knowing before a participant does.
+
 ### Rejecting natural grooves
 
 Pre-existing ripples/texture can look like grooves. Four independent filters (**Reject natural grooves** panel; each disabled at 0) suppress them: **Reference subtraction** (`ref_strength`) — capture the *undrawn* sand with **Set Reference**; pre-existing grooves appear in both frames and **cancel**, leaving only what was drawn (the most reliable discriminator; camera + sandbox must stay still). **Min mean depth** — drop grooves whose *average* relief is shallow (raked grooves are consistently a few mm deep, faint ripples aren't). **Min / Max width** — keep only grooves matching the raking tool's width. **Min length** — drop short fragments of natural texture. (Width/length get their mm scale from the drawing's fit onto the surface, or the Test-Mode workspace.)
@@ -552,6 +565,37 @@ What the box measures depends on whether a reference is set, and it relabels its
 
 - **Reference set → "Ignore above sand"** — a height above the sand surface. Anything standing more than this many mm proud of the sand is an object. Try **30–60 mm**. This is the one to use, and the only one that works on a tilted camera.
 - **No reference → "Ignore closer than"** — an absolute distance from the camera. Set it a little nearer than the sand (read it off the Participant popup's labels).
+
+### Why the projected mask holds still
+
+Point the projector at the sand and the white mask used to shimmer — twitching in width and length even with nobody near the sandbox. That is not the detection changing its mind; it is the camera's own noise. A D435i's depth reading wobbles by 1–2 mm from frame to frame, and a raked groove is only about 1.5 mm deep, so every pixel along a groove's edge was a genuine coin flip, ten times a second.
+
+**Capture never had this problem** — it averages a full second of frames before the robot draws, which is why the toolpath was always steady while the picture was not. The live view now gets the same treatment, plus one extra trick:
+
+- **Averaging.** Detection runs on a running average of the depth instead of the latest frame. The wobble is random, so it cancels; the sand isn't, so it stays. Costs about half a second of settling, which nobody notices on sand that is finished being drawn.
+- **A deadband.** Like a thermostat that won't switch off the moment the temperature ticks up: once a pixel is lit, it stays lit until its groove clearly stops being one, rather than dropping out on a hair's dip. This is what stops the ends of a stroke flickering on and off.
+
+Both are **live-only**. The Depth view, the depth labels and the Participant trigger deliberately keep the raw frame — the trigger has to notice a hand *immediately*, and the Depth view is what you use to check the camera is really seeing what you think. And nothing here reaches the captured still, so the robot's path is unchanged.
+
+If you want to tune it, the three numbers are `LIVE_DEPTH_EMA_ALPHA`, `LIVE_DEPTH_HOLD_CYCLES` and `LIVE_MASK_HYSTERESIS` in `config.py`; setting the first and last to `1.0` turns the whole thing off.
+
+> **If it still flickers**, check whether it does so with the projection window *closed*. If it only misbehaves when the projector is lit, the projector's light is reaching the depth sensor and you have a feedback loop, which needs a different fix (angle, or a dimmer output) — not these settings.
+
+### Why the projection stopped trailing the Mask view
+
+Steadying the mask had a second, less obvious payoff. The projection window holds the mask in a warped, full-screen layer, so **every frame it receives costs a decode and a full redraw at projector resolution** — and it was receiving ten a second, of a picture that mostly wasn't changing. That work is what put the projection visibly behind the Mask viewport in Developer Mode.
+
+Now the app **only sends the projector a frame when the picture actually changed**. On sand nobody is touching, the stream goes quiet; the projector keeps showing the last picture (which is correct) and spends nothing. The moment a groove appears, frames flow again immediately.
+
+- Still sand: **~0 frames per 10 seconds**, down from ~90.
+- While a groove is being raked: most frames still go through, so nothing feels sluggish.
+- A projection window that reconnects gets a picture straight away rather than waiting for the next change.
+
+This only works *because* the mask is steady now — a shimmering one differs every frame and there would be nothing to skip. The two fixes need each other.
+
+The dials are `PROJECTION_CHANGE_PX` (how many pixels must differ before it's worth resending — a handful is invisible once the mask is thrown across a sandbox), `PROJECTION_KEEPALIVE_S` and `PROJECTION_EVERY_S` in `config.py`.
+
+> ⚠️ `PROJECTION_EVERY_S` is **off** by default and should stay that way unless the projection falls *progressively* further behind the longer you watch. That symptom is a backlog, and sending fewer frames cures it. A lag that stays the *same* size is decode cost — raising this would only make it worse.
 
 ### Tilted cameras, and why "height above the sand" matters
 
@@ -764,6 +808,8 @@ All parameters live in `config.py`.
 | `DEPTH_HEIGHT`                             | `480`   | Depth stream height of ONE camera (px)  |
 | `DEPTH_FPS`                                | `30`    | Depth stream frame rate                 |
 | `DEPTH_AVERAGE_FRAMES`                     | `30`    | Frames temporally averaged per camera on Capture |
+| `CAMERA_POLL_IDLE_S`                       | `0.002` | How long the camera reader waits when no frame is ready |
+| `CAPTURE_REFILL_MAX_S`                     | `5.0`   | Ceiling on the measured buffer-refill wait — see *Why Capture waits* |
 | `DEPTH_COLOR_NEAR_M` / `DEPTH_COLOR_FAR_M` | `0.0`   | Colormap range in metres (0 = auto)     |
 | `STITCH_MAIN_EVERY_S`                      | `0.1`   | How often the combined live view is rebuilt (s) — raise if the rig can't keep up |
 | `LIVE_GROOVE_EVERY`                        | `1`     | Rebuild the Skeleton/Mask preview every Nth canvas (1 = as often as Depth) |
@@ -846,8 +892,9 @@ SOUND_CUES = {
 | -------------------- | ------- | -------------------------------------------------------------------- |
 | `SHOW_MODULE_BANNER` | `True`  | Print the feature→modules table at startup                           |
 | `SHOW_MODULE_TRACE`  | `True`  | Print the `└ a.py → b.py` module trail under each task line          |
-| `PROFILE_PIPELINE`   | `False` | Print where the live views' time goes — see *Why is the live view lagging?* |
+| `PROFILE_PIPELINE`   | `False` | Print where the live views' time goes — see *Why is the live view lagging?* Or set `SANDSKRIPT_PROFILE=1` for one run |
 | `PROFILE_EVERY_S`    | `5.0`   | Seconds between profile reports                                      |
+| `CAMERA_LIMIT`       | `0`     | Cap how many cameras the app opens (0 = all). For measuring; set `SANDSKRIPT_CAMERAS=2` for one run |
 
 ---
 
@@ -863,25 +910,71 @@ Every live view comes off **one thread**: it polls each camera, stitches the com
 
 Those are the fresh values. They were 0.2 / 2 — 200 ms and 400 ms — which is where the "Depth lags a bit, Mask lags more" came from: the mask was rebuilt half as often as the depth view, so it was twice as stale. Measurement showed the work using only ~15% of the thread, so the rates were raised to spend that headroom; it now runs about 40% busy. **If a bigger rig or a slower machine can't hold 10 Hz, raise `STITCH_MAIN_EVERY_S` back towards 0.2** — the profiler below tells you whether it's keeping up.
 
-If it feels worse than that, set `PROFILE_PIPELINE = True` in `config.py`, restart, and watch the console:
+If it feels worse than that, run the app with profiling on and watch the console:
+
+```powershell
+$env:SANDSKRIPT_PROFILE = 1; .\run.bat
+```
+
+(In `cmd`: `set SANDSKRIPT_PROFILE=1 && run.bat`. Either way it lasts for that window only, which is the point — nothing is left behind in the repo.)
 
 ```
-[profile] canvas — 25 cycles in 5.2 s = 4.8 Hz (target 5.0 Hz)
-    detect             1885.0 ms total   145.0 ms x 13     36.2% of window
-    stitch             1875.0 ms total    75.0 ms x 25     36.0% of window
-    encode_depth        450.0 ms total    18.0 ms x 25      8.7% of window
+[profile] canvas | 2 cam | 1229x379 px | 2.37 mm/px - 47 cycles in 5.0 s = 9.5 Hz (target 10.0 Hz)
+    work 105.4 ms/cycle of a 100.0 ms budget = 105% busy
+    stage              total ms   ms/cyc  ms/call      max  calls
+    stitch               2708.9    67.72    67.72    72.93     40
+      warp_rgb           1295.8    32.39    16.20    19.66     80
+      blend              1092.1    27.30    27.30    30.40     40
+      warp_depth          247.4     6.18     3.09     4.34     80
+      prepare               7.4     0.18     0.18     0.29     40
+      alloc                 1.8     0.05     0.05     0.13     40
+    detect                953.1    23.83    23.83    25.91     40
+      blur                627.6    15.69    15.69    16.79     40
+      prep                130.2     3.26     3.26     4.18     40
+      morph                97.2     2.43     2.43     3.36     40
+      skeleton             75.0     1.88     1.88     3.36     40
+      threshold            12.5     0.31     0.31     0.41     40
+    colorize              386.7     9.67     9.67    10.82     40
+    encode_depth           96.5     2.41     2.41     2.72     40
     ...
-[profile] mjpeg — over 5.0 s
+[profile] mjpeg - over 5.0 s
     depth_color.KB                36,000 total     7,200.0 /s
     depth_color.new                   25 total         5.0 /s
     depth_color.sent                 150 total        30.0 /s
 ```
 
-**Read the achieved rate first.** Near the target means the cadence is the limit and the work has headroom — the views are as fresh as they were asked to be. Well under it (the report says so) means the work is the limit, and the stage at the top of the list is where the time went. `x 13` versus `x 25` is not a bug: detection deliberately runs every second cycle.
+How to read it, in order:
+
+1. **The header says which rig this is** — cameras, canvas size, resolution. Necessary because the interesting comparison is usually between runs.
+2. **The achieved rate.** Near the target means the cadence is the limit and the work has headroom — the views are as fresh as they were asked to be. Well under it (the report says so) means the work is the limit.
+3. **The `work` line** is the headroom in one number: what a canvas costs against what 10 Hz allows it to cost. Over 100% busy and the rate cannot be met, whatever the stage table says.
+4. **`ms/cyc`, not `ms/call`.** It is total ÷ canvases, so a stage that runs every second canvas still shows what it costs *per canvas*. `ms/call` is what it costs when it does run. A `calls` count above the cycle count means the stage runs once per camera — so there, `ms/call` is one camera and `ms/cyc` is the whole rig.
+   *A second report, `[profile] reader`, comes from the thread that reads the cameras. Its target is the camera frame rate, not the canvas rate — it has a different job and must keep up with a different clock.*
+5. **Indented rows are a breakdown** of the stage above them. Their time is *inside* the parent's, so they are left out of the `work` total.
+6. **`max`** is the worst single call in the window. A stage averaging 5 ms with a 40 ms max is a stutter, which looks quite different on screen from one that is evenly slow.
 
 The `mjpeg` block counts frames **sent** against frames **skipped** because the picture hadn't changed. Each picture now goes out once — the streams still look 30 times a second, but a repeat isn't re-transmitted. That removed about 78% of the traffic and, with it, a matching share of the work in the loop that also serves the WebSocket and every other stream (a projection window makes five).
 
-Profiling is off in git and costs nothing while off.
+Profiling is off in git and costs nothing while off. Prefer the environment variable to editing `config.py`: a `True` left in the file slows every later run, silently.
+
+#### What gets slower when you add a camera
+
+Two costs grow differently, and the breakdown separates them:
+
+| Grows with | Stages | Why |
+| ---------- | ------ | --- |
+| **Camera count** | `stitch.prepare`, `stitch.warp_depth`, `stitch.warp_rgb` | one call per camera per canvas |
+| **Canvas area** | `stitch.blend`, `detect.blur`, `colorize`, the encodes | one pass over the whole combined picture |
+
+In practice both grow at once, because more cameras cover more sand and the canvas is sized to hold them. That's the honest comparison, so measure it that way — cap the rig instead of changing anything else:
+
+```powershell
+$env:SANDSKRIPT_PROFILE = 1; $env:SANDSKRIPT_CAMERAS = 1; .\run.bat
+```
+
+Then 2, then 3, and compare the `work` lines. Cameras are enumerated by serial and sorted, so a cap takes the same first N every time; an unopened camera streams nothing, so this is equivalent to unplugging one, without crawling behind the rig. The startup log says when a cap is active — and to clear it, `Remove-Item Env:SANDSKRIPT_CAMERAS` or just close the window.
+
+> ⚠️ A capped run builds a **smaller canvas**, and the canvas is what the crop, the reference frame and every mm-per-pixel number are relative to. That is fine for measuring, but don't tune detection parameters or re-do the projector corner-pin during a capped run — clear `SANDSKRIPT_CAMERAS` first.
 
 
 
